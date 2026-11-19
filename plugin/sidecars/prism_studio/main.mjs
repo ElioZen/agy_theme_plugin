@@ -3,6 +3,7 @@ import { extname, join } from 'node:path';
 import { SidecarApp, Response } from 'sidecar_sdk';
 import { MacBackdropCompanion } from './companion.mjs';
 import {
+  ASSET_VERSION,
   BUILTIN_PRESETS,
   BUILTIN_WALLPAPERS,
   BUILTIN_WALLPAPERS_DIR,
@@ -37,6 +38,7 @@ function readPublicFile(relPath) {
 
 function buildStatePayload(settings = storage.loadSettings()) {
   return {
+    assetVersion: ASSET_VERSION,
     settings,
     builtinPresets: BUILTIN_PRESETS,
     builtinWallpapers: BUILTIN_WALLPAPERS.filter((w) =>
@@ -184,6 +186,49 @@ app.api('/api/companion', async (data) => {
   return buildStatePayload(current);
 });
 
+function parseResetDurationMs(text) {
+  const s = String(text || '').trim().toLowerCase();
+  if (!s) return 0;
+  let ms = 0;
+  const d = /(\d+)\s*(?:d|天)/.exec(s);
+  const h = /(\d+)\s*(?:h|小时|时)/.exec(s);
+  const m = /(\d+)\s*(?:m|分)/.exec(s);
+  if (d) ms += Number(d[1]) * 24 * 60 * 60 * 1000;
+  if (h) ms += Number(h[1]) * 60 * 60 * 1000;
+  if (m) ms += Number(m[1]) * 60 * 1000;
+  return ms;
+}
+
+app.api('/api/quota-anchor', (data) => {
+  if (data?.clear) {
+    const updated = storage.saveSettings({
+      quotaAnchor: { gemini5h: null, gemini7d: null, claude5h: null, claude7d: null },
+    });
+    return buildStatePayload(updated);
+  }
+  const now = Date.now();
+  const buildEntry = (pctVal, resetStr) => {
+    if (pctVal === '' || pctVal === null || pctVal === undefined) return null;
+    const pct = Math.max(0, Math.min(100, Number(pctVal)));
+    if (!Number.isFinite(pct)) return null;
+    const durMs = parseResetDurationMs(resetStr);
+    return {
+      leftPct: pct,
+      resetAtMs: durMs > 0 ? now + durMs : 0,
+      anchoredAtMs: now,
+    };
+  };
+  const updated = storage.saveSettings({
+    quotaAnchor: {
+      gemini5h: buildEntry(data?.g5hPct, data?.g5hReset),
+      gemini7d: buildEntry(data?.g7dPct, data?.g7dReset),
+      claude5h: buildEntry(data?.c5hPct, data?.c5hReset),
+      claude7d: buildEntry(data?.c7dPct, data?.c7dReset),
+    },
+  });
+  return buildStatePayload(updated);
+});
+
 app.api(
   '/api/telemetry',
   (data) => {
@@ -195,6 +240,9 @@ app.api(
     const statsScope = ['project', 'session', 'all'].includes(data.statsScope)
       ? data.statsScope
       : settings.telemetry.statsScope || 'project';
+    const sourceFilter = ['all', 'gui', 'agy-cli', 'codex-cli'].includes(data.sourceFilter)
+      ? data.sourceFilter
+      : settings.telemetry.sourceFilter || 'all';
     const range = ['today', '7d', '30d', 'all'].includes(data.range)
       ? data.range
       : settings.telemetry.range || 'today';
@@ -203,10 +251,6 @@ app.api(
     const hostConversationId = String(data.hostConversationId || '');
     const activeWorkspaceUri = String(data.activeWorkspaceUri || '');
     const selectedProjectId = String(data.selectedProjectId || '');
-    const includeCliInProject =
-      data.includeCliInProject !== undefined
-        ? data.includeCliInProject === 'true' || data.includeCliInProject === true
-        : settings.telemetry.includeCliInProject !== false;
     const showRecentAgents =
       data.showRecentAgents !== undefined
         ? data.showRecentAgents === 'true' || data.showRecentAgents === true
@@ -219,10 +263,11 @@ app.api(
       selectedProjectId,
       followLatest,
       statsScope,
+      sourceFilter,
       range,
       windowLimit,
-      includeCliInProject,
       showRecentAgents,
+      quotaAnchor: settings.quotaAnchor || {},
     });
   },
   'GET',

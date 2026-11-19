@@ -39,7 +39,7 @@ export function parseModelAndEffort(rawModel, explicitEffort = '') {
   let base = m;
 
   if (/^MODEL_PLACEHOLDER_/i.test(m)) {
-    return { baseModel: `Gemini (${m.replace(/^MODEL_PLACEHOLDER_/, '')})`, effort: effort || '—' };
+    return { baseModel: `未映射模型 (${m.replace(/^MODEL_PLACEHOLDER_/, '')})`, effort: effort || '—' };
   }
 
   const suffixMatch = /-(xhigh|high|medium|low|max|thinking)$/i.exec(base);
@@ -67,9 +67,16 @@ export function parseModelAndEffort(rawModel, explicitEffort = '') {
 export function formatModelName(modelId) {
   if (!modelId) return '未知模型';
   if (/^MODEL_PLACEHOLDER_/i.test(modelId)) {
-    return `Gemini (${modelId.replace(/^MODEL_PLACEHOLDER_/, '')})`;
+    return `未映射模型 (${modelId.replace(/^MODEL_PLACEHOLDER_/, '')})`;
   }
   return modelId;
+}
+
+export function classifyAgyQuotaFamily(modelId) {
+  const s = String(modelId || '').toLowerCase();
+  if (s.includes('claude') || s.includes('gpt')) return 'claude';
+  if (s.includes('gemini')) return 'gemini';
+  return 'other';
 }
 
 export function estimateCostUsd(modelId, uncachedInput, cacheRead, output) {
@@ -258,30 +265,39 @@ function parseAgyTranscript(filePath) {
     if (ts > 0) prevStepMs = ts;
   }
 
-  // Infer exact live activity from last transcript step
-  let activity = '空闲';
+  // Infer exact live activity & whether the turn has truly finished:
+  // In Antigravity transcripts, every completed step has status === 'DONE'.
+  // A turn is ONLY finished when the last step is a PLANNER_RESPONSE with status === 'DONE' AND no pending tool_calls!
+  let activity = '本轮已完成';
   let activityKind = 'idle';
+  let isTurnFinished = true;
   if (lastObj) {
     const tools = Array.isArray(lastObj.tool_calls) ? lastObj.tool_calls : [];
     const lastToolName = tools.length > 0 ? tools[tools.length - 1]?.name || tools[tools.length - 1]?.tool_name || '' : '';
-    const notDone = lastObj.status && lastObj.status !== 'DONE' && lastObj.status !== 'ERROR';
+    const notDone = Boolean(lastObj.status && lastObj.status !== 'DONE' && lastObj.status !== 'ERROR');
 
     if (lastObj.type === 'PLANNER_RESPONSE') {
       if (tools.length > 0) {
+        isTurnFinished = false;
         activity = describeToolAction(lastToolName);
         activityKind = 'tool';
       } else if (notDone || (lastObj.thinking && !lastObj.content)) {
+        isTurnFinished = false;
         activity = '正在思考 (Thinking)';
         activityKind = 'thinking';
       } else {
-        activity = '生成回复中';
-        activityKind = 'responding';
+        isTurnFinished = true;
+        activity = '本轮已完成';
+        activityKind = 'idle';
       }
     } else if (lastObj.type === 'USER_INPUT') {
+      isTurnFinished = false;
       activity = '正在思考 (Thinking)';
       activityKind = 'thinking';
     } else {
-      activity = notDone ? '执行工具中' : '等待下一步思考';
+      // GENERIC (tool output) or SYSTEM_MESSAGE right after a tool call -> model is now thinking next step!
+      isTurnFinished = false;
+      activity = notDone ? '执行工具中' : '正在思考下一步 (Thinking)';
       activityKind = notDone ? 'tool' : 'thinking';
     }
   }
@@ -294,6 +310,7 @@ function parseAgyTranscript(filePath) {
     mtimeMs: stat.mtimeMs,
     activity,
     activityKind,
+    isTurnFinished,
     lastStatus: String(lastObj?.status || ''),
     charWeights: {
       user: userChars,
@@ -592,11 +609,13 @@ function summarizeModelEntries(entries) {
   let totalCacheRead = 0;
   let totalOutput = 0;
   let totalCostUsd = 0;
+  const bySource = { gui: 0, agyCli: 0, codexCli: 0 };
 
   for (const t of entries) {
     const mId = t.model || 'unknown';
+    const src = t.sourceKind || 'gui';
     const { baseModel, effort } = parseModelAndEffort(mId, t.effort || '');
-    const key = mId;
+    const key = `${mId}::${src}`;
     let entry = map.get(key);
     if (!entry) {
       entry = {
@@ -604,7 +623,8 @@ function summarizeModelEntries(entries) {
         displayName: formatModelName(mId),
         baseModel,
         effort,
-        sourceTag: t.sourceTag || '',
+        sourceKind: src,
+        sourceLabel: src === 'agy-cli' ? 'AGY CLI' : src === 'codex-cli' ? 'Codex CLI' : 'AGY GUI',
         uncachedInput: 0,
         cacheRead: 0,
         output: 0,
@@ -614,13 +634,18 @@ function summarizeModelEntries(entries) {
       };
       map.set(key, entry);
     }
+    const rowTok = t.uncachedInput + t.cacheRead + t.output;
     entry.uncachedInput += t.uncachedInput;
     entry.cacheRead += t.cacheRead;
     entry.output += t.output;
-    entry.totalTokens += t.uncachedInput + t.cacheRead + t.output;
+    entry.totalTokens += rowTok;
     entry.turns += t.turns || 1;
     const cost = estimateCostUsd(mId, t.uncachedInput, t.cacheRead, t.output);
     entry.costUsd += cost;
+
+    if (src === 'agy-cli') bySource.agyCli += rowTok;
+    else if (src === 'codex-cli') bySource.codexCli += rowTok;
+    else bySource.gui += rowTok;
 
     totalUncached += t.uncachedInput;
     totalCacheRead += t.cacheRead;
@@ -650,7 +675,53 @@ function summarizeModelEntries(entries) {
     output: totalOutput,
     cacheHitRate: promptAll > 0 ? Math.round((totalCacheRead / promptAll) * 1000) / 10 : 0,
     costUsd: Math.round(totalCostUsd * 100) / 100,
+    bySource,
     models,
+  };
+}
+
+function buildQuotaWindowStats(turns, windowMs, anchor, nowMs) {
+  const cutoff = nowMs - windowMs;
+  let tokens = 0;
+  let guiTokens = 0;
+  let cliTokens = 0;
+  let calls = 0;
+  let sinceAnchorTokens = 0;
+  let sinceAnchorCalls = 0;
+
+  const anchorValid = Boolean(anchor && typeof anchor.leftPct === 'number' && anchor.anchoredAtMs);
+  const resetAtMs = anchorValid && anchor.resetAtMs ? Number(anchor.resetAtMs) : 0;
+  const anchorExpired = resetAtMs > 0 && nowMs >= resetAtMs;
+
+  for (const t of turns) {
+    if (!t.ts || t.ts < cutoff) continue;
+    const tot = t.uncachedInput + t.cacheRead + t.output;
+    tokens += tot;
+    if (t.sourceKind === 'agy-cli') cliTokens += tot;
+    else guiTokens += tot;
+    calls += 1;
+    if (anchorValid && !anchorExpired && t.ts > anchor.anchoredAtMs) {
+      sinceAnchorTokens += tot;
+      sinceAnchorCalls += 1;
+    }
+  }
+
+  return {
+    tokens,
+    guiTokens,
+    cliTokens,
+    calls,
+    anchor: anchorValid
+      ? {
+          leftPct: anchorExpired ? 100 : anchor.leftPct,
+          resetAtMs: anchorExpired ? 0 : resetAtMs,
+          resetInMs: anchorExpired ? 0 : Math.max(0, resetAtMs - nowMs),
+          anchoredAtMs: anchor.anchoredAtMs,
+          expired: anchorExpired,
+          sinceAnchorTokens: anchorExpired ? 0 : sinceAnchorTokens,
+          sinceAnchorCalls: anchorExpired ? 0 : sinceAnchorCalls,
+        }
+      : null,
   };
 }
 
@@ -671,10 +742,11 @@ export function buildTelemetrySnapshot({
   selectedProjectId = '',
   followLatest = true,
   statsScope = 'project', // 'project' | 'session' | 'all'
+  sourceFilter = 'all', // 'all' | 'gui' | 'agy-cli' | 'codex-cli'
   range = 'today',
   windowLimit = 512000,
-  includeCliInProject = true,
   showRecentAgents = false,
+  quotaAnchor = {},
 } = {}) {
   const appDataDir = resolveAppDataDir();
   const desktopBrainDir = join(appDataDir, 'brain');
@@ -850,70 +922,96 @@ export function buildTelemetrySnapshot({
     if (!parentOfChild.has(cid)) parentOfChild.set(cid, desc.parentId);
   }
 
-  // Session stats (strictly current conversation within chosen time range)
-  const sessionStats = summarizeModelEntries(filterByRange(activeTurns));
+  // Session stats (strictly current GUI conversation within chosen time range)
+  const sessionStats = summarizeModelEntries(
+    filterByRange(activeTurns).map((t) => ({ ...t, sourceKind: 'gui' })),
+  );
 
-  // Project stats map (ONLY configured sidebar Projects!)
+  // Project stats map (ONLY configured sidebar Projects! Strictly tags gui vs agy-cli vs codex-cli!)
   const projectStatsMap = new Map();
   for (const proj of configuredProjects) {
     projectStatsMap.set(proj.id, {
       id: proj.id,
       name: proj.name,
       sessionIds: new Set(),
-      cliCount: 0,
+      agyCliCount: 0,
+      codexCliCount: 0,
       entries: [],
     });
   }
 
+  // Also collect ALL Antigravity turns (AGY GUI + AGY CLI ONLY — never external Codex CLI!) for 5h/7d quota tracking
+  const agyGeminiTurns = [];
+  const agyClaudeTurns = [];
+
   for (const [cid, parsed] of parsedDesktop.entries()) {
+    for (const t of parsed.turns) {
+      const fam = classifyAgyQuotaFamily(t.model);
+      if (fam === 'gemini') agyGeminiTurns.push({ ...t, sourceKind: 'gui' });
+      else if (fam === 'claude') agyClaudeTurns.push({ ...t, sourceKind: 'gui' });
+    }
     const desc = subDescriptors.get(cid);
     const proj = resolveProjectForConv(cid, desc?.workspaceUris || []);
     if (!proj) continue;
     const bucket = projectStatsMap.get(proj.id);
     if (!parentOfChild.has(cid)) bucket.sessionIds.add(cid);
     const ranged = filterByRange(parsed.turns);
-    if (ranged.length) bucket.entries.push(...ranged);
+    if (ranged.length) {
+      bucket.entries.push(...ranged.map((t) => ({ ...t, sourceKind: 'gui' })));
+    }
   }
 
-  if (includeCliInProject) {
-    for (const [cid, parsed] of parsedAgyCli.entries()) {
-      const proj = resolveProjectForConv(cid);
-      if (!proj) continue;
-      const bucket = projectStatsMap.get(proj.id);
-      const ranged = filterByRange(parsed.turns);
-      if (ranged.length) {
-        bucket.cliCount += 1;
-        bucket.entries.push(...ranged.map((t) => ({ ...t, sourceTag: 'AGY CLI' })));
-      }
+  for (const [cid, parsed] of parsedAgyCli.entries()) {
+    for (const t of parsed.turns) {
+      const fam = classifyAgyQuotaFamily(t.model);
+      if (fam === 'gemini') agyGeminiTurns.push({ ...t, sourceKind: 'agy-cli' });
+      else if (fam === 'claude') agyClaudeTurns.push({ ...t, sourceKind: 'agy-cli' });
     }
-    for (const cs of codexSessions) {
-      if (cutoffRangeMs > 0 && cs.lastActiveMs < cutoffRangeMs) continue;
-      if (cs.totalTokens <= 0) continue;
-      const bucket = projectStatsMap.get(cs.projectId);
-      if (!bucket) continue;
-      bucket.cliCount += 1;
-      bucket.entries.push({
-        model: cs.model,
-        effort: cs.effort,
-        uncachedInput: cs.uncachedInput,
-        cacheRead: cs.cacheRead,
-        output: cs.output,
-        turns: Math.max(1, cs.turnCount),
-        sourceTag: 'Codex CLI',
-      });
+    const proj = resolveProjectForConv(cid);
+    if (!proj) continue;
+    const bucket = projectStatsMap.get(proj.id);
+    const ranged = filterByRange(parsed.turns);
+    if (ranged.length) {
+      bucket.agyCliCount += 1;
+      bucket.entries.push(...ranged.map((t) => ({ ...t, sourceKind: 'agy-cli' })));
     }
   }
+
+  for (const cs of codexSessions) {
+    if (cutoffRangeMs > 0 && cs.lastActiveMs < cutoffRangeMs) continue;
+    if (cs.totalTokens <= 0) continue;
+    const bucket = projectStatsMap.get(cs.projectId);
+    if (!bucket) continue;
+    bucket.codexCliCount += 1;
+    bucket.entries.push({
+      model: cs.model,
+      effort: cs.effort,
+      uncachedInput: cs.uncachedInput,
+      cacheRead: cs.cacheRead,
+      output: cs.output,
+      turns: Math.max(1, cs.turnCount),
+      sourceKind: 'codex-cli',
+    });
+  }
+
+  const filterBySource = (entries) => {
+    if (!sourceFilter || sourceFilter === 'all') return entries;
+    return entries.filter((e) => e.sourceKind === sourceFilter);
+  };
 
   const projectSummaries = configuredProjects.map((proj) => {
     const bkt = projectStatsMap.get(proj.id);
-    const stats = summarizeModelEntries(bkt.entries);
+    const allStats = summarizeModelEntries(bkt.entries);
+    const filteredStats = sourceFilter === 'all' ? allStats : summarizeModelEntries(filterBySource(bkt.entries));
     return {
       id: proj.id,
       name: proj.name,
       sessionCount: topConversations.filter((c) => c.projectId === proj.id).length,
-      cliCount: bkt.cliCount,
+      agyCliCount: bkt.agyCliCount,
+      codexCliCount: bkt.codexCliCount,
       isActive: proj.id === activeProject?.id,
-      ...stats,
+      ...filteredStats,
+      allBySource: allStats.bySource,
     };
   });
 
@@ -923,13 +1021,35 @@ export function buildTelemetrySnapshot({
       id: '',
       name: '当前项目',
       sessionCount: 0,
-      cliCount: 0,
+      agyCliCount: 0,
+      codexCliCount: 0,
       ...summarizeModelEntries([]),
+      allBySource: { gui: 0, agyCli: 0, codexCli: 0 },
     };
 
-  const allProjectsEntries = [];
-  for (const bkt of projectStatsMap.values()) allProjectsEntries.push(...bkt.entries);
-  const allProjectsStats = summarizeModelEntries(allProjectsEntries);
+  const allProjectsRawEntries = [];
+  for (const bkt of projectStatsMap.values()) allProjectsRawEntries.push(...bkt.entries);
+  const allProjectsUnfiltered = summarizeModelEntries(allProjectsRawEntries);
+  const allProjectsStats = {
+    ...(sourceFilter === 'all' ? allProjectsUnfiltered : summarizeModelEntries(filterBySource(allProjectsRawEntries))),
+    allBySource: allProjectsUnfiltered.bySource,
+  };
+
+  // Real Antigravity 5h & Weekly (7d) Quota Windows (strictly AGY GUI + AGY CLI, never external Codex!)
+  const FIVE_H = 5 * 60 * 60 * 1000;
+  const SEVEN_D = 7 * 24 * 60 * 60 * 1000;
+  const quotas = {
+    gemini: {
+      label: 'Gemini 系列',
+      h5: buildQuotaWindowStats(agyGeminiTurns, FIVE_H, quotaAnchor?.gemini5h, nowMs),
+      d7: buildQuotaWindowStats(agyGeminiTurns, SEVEN_D, quotaAnchor?.gemini7d, nowMs),
+    },
+    claude: {
+      label: 'Claude / GPT 系列',
+      h5: buildQuotaWindowStats(agyClaudeTurns, FIVE_H, quotaAnchor?.claude5h, nowMs),
+      d7: buildQuotaWindowStats(agyClaudeTurns, SEVEN_D, quotaAnchor?.claude7d, nowMs),
+    },
+  };
 
   // ==================== ACTIVE CLI & SUBAGENT MONITOR ====================
   // Show ONLY live/active agents by default (running or touched within 3 min),
@@ -980,7 +1100,9 @@ export function buildTelemetrySnapshot({
     if (!proj) continue;
     const lastActiveMs = Math.max(s?.lastModifiedMs || 0, parsed.lastStepAt || 0, parsed.mtimeMs || 0);
     const age = nowMs - lastActiveMs;
-    const isRunning = Boolean(s?.isRunning) || (age < 90 * 1000 && parsed.lastStatus !== 'DONE');
+    const isRunning =
+      Boolean(s?.isRunning) ||
+      (!parsed.isTurnFinished && age < 15 * 60 * 1000);
     const isLive = isRunning || age <= LIVE_WINDOW_MS;
     const isRecent = age <= RECENT_WINDOW_MS;
     if (!isLive && !isRecent) continue;
@@ -1011,7 +1133,7 @@ export function buildTelemetrySnapshot({
     });
   }
 
-  // C. Active Native Subagents (ONLY running or touched recently — zero dead history!)
+  // C. Active Native GUI Subagents (ONLY running or touched recently — zero dead history!)
   const nativeSubIds = new Set([...parentOfChild.keys(), ...subDescriptors.keys()]);
   for (const cid of nativeSubIds) {
     const s = summaryById.get(cid);
@@ -1025,7 +1147,7 @@ export function buildTelemetrySnapshot({
     const age = nowMs - lastActiveMs;
     const isRunning =
       (Boolean(s?.isRunning) && !s?.killed) ||
-      (age < 60 * 1000 && parsed?.lastStatus && parsed.lastStatus !== 'DONE');
+      (Boolean(parsed && !parsed.isTurnFinished) && !s?.killed && age < 15 * 60 * 1000);
     const isLive = isRunning || age <= LIVE_WINDOW_MS;
     const isRecent = age <= RECENT_WINDOW_MS;
     if (!isLive && !isRecent) continue;
@@ -1036,11 +1158,11 @@ export function buildTelemetrySnapshot({
 
     const totals = summarizeModelEntries(parsed?.turns || []);
     const { baseModel, effort } = parseModelAndEffort(parsed?.lastModel || '');
-    const kindLabel = desc?.typeName ? `Sub · ${desc.typeName}` : 'Subagent';
+    const kindLabel = desc?.typeName ? `GUI 子智能体 · ${desc.typeName}` : 'GUI 子智能体';
     liveAgents.push({
       id: cid,
       shortId: cid.slice(0, 8),
-      kind: 'subagent',
+      kind: 'gui-subagent',
       kindLabel,
       projectId: proj.id,
       projectName: proj.name,
@@ -1076,12 +1198,13 @@ export function buildTelemetrySnapshot({
     conversations: visibleConversations.slice(0, 30),
     stats: {
       scope: statsScope,
+      sourceFilter,
       range,
-      includeCliInProject,
       project: activeProjectStats,
       session: sessionStats,
       all: allProjectsStats,
     },
+    quotas,
     context: {
       used: usedTokens,
       limit,

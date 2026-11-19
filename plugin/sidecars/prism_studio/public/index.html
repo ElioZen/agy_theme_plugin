@@ -69,10 +69,19 @@
 
           <div class="stats-meta-row">
             <span id="stats-scope-caption" class="card-sub">—</span>
-            <label class="inline-check" id="wrap-include-cli">
-              <input id="chk-include-cli" type="checkbox" checked />
-              <span>含 CLI 消耗</span>
-            </label>
+            <div class="seg-group" id="stats-source-group">
+              <button class="seg-btn active" data-source="all">全部</button>
+              <button class="seg-btn" data-source="gui">AGY GUI</button>
+              <button class="seg-btn" data-source="agy-cli">AGY CLI</button>
+              <button class="seg-btn" data-source="codex-cli">Codex</button>
+            </div>
+          </div>
+
+          <!-- Source Breakdown (strictly separates AGY GUI vs AGY CLI vs Codex CLI) -->
+          <div id="source-split-strip" class="source-split-strip tabular">
+            <span>AGY GUI <strong id="src-gui">0</strong></span>
+            <span>AGY CLI <strong id="src-agycli">0</strong></span>
+            <span>Codex CLI <strong id="src-codex">0</strong></span>
           </div>
 
           <!-- Cache / Uncached / Output summary -->
@@ -86,8 +95,39 @@
           <div id="stats-ratio-bar" class="ratio-bar"></div>
           <div id="stats-models-list" class="models-list"></div>
 
-          <!-- Per-Project Chips (shown when viewing All Projects) -->
-          <div id="all-projects-strip" class="projects-mini-grid" hidden></div>
+          <!-- Always-visible Quick Project Switcher Strip -->
+          <div id="projects-switch-strip" class="projects-mini-grid"></div>
+        </div>
+
+        <!-- WINDOW 2: 5h & Weekly Quota Window Monitor (Honest Local + Optional Official Anchor) -->
+        <div class="glass-card">
+          <div class="card-header wrap-header">
+            <div>
+              <h2 class="card-title">5小时与每周额度监控</h2>
+              <p class="card-sub">仅计入 Antigravity（GUI + AGY CLI），不含外部 Codex；支持同步官方剩余 % 与重置倒计时</p>
+            </div>
+            <button id="btn-quota-anchor" class="ghost-btn compact-btn" type="button">同步官方实测</button>
+          </div>
+
+          <div id="quota-anchor-editor" class="anchor-editor" hidden>
+            <p class="card-sub" style="margin:0 0 7px">照抄左下角 Usage 弹窗填入（如 <code>68</code> 与 <code>6d 4h</code>），驾驶舱会自动实时倒计时：</p>
+            <div class="anchor-grid">
+              <label><span>Gemini 周剩余(%)</span><input id="inp-g7d-pct" type="number" min="0" max="100" placeholder="68" class="glass-input" /></label>
+              <label><span>Gemini 周重置</span><input id="inp-g7d-reset" type="text" placeholder="6d 4h" class="glass-input" /></label>
+              <label><span>Gemini 5h剩余(%)</span><input id="inp-g5h-pct" type="number" min="0" max="100" placeholder="84" class="glass-input" /></label>
+              <label><span>Gemini 5h重置</span><input id="inp-g5h-reset" type="text" placeholder="4h 15m" class="glass-input" /></label>
+              <label><span>Claude 周剩余(%)</span><input id="inp-c7d-pct" type="number" min="0" max="100" placeholder="24" class="glass-input" /></label>
+              <label><span>Claude 周重置</span><input id="inp-c7d-reset" type="text" placeholder="6d 4h" class="glass-input" /></label>
+              <label><span>Claude 5h剩余(%)</span><input id="inp-c5h-pct" type="number" min="0" max="100" placeholder="100" class="glass-input" /></label>
+              <label><span>Claude 5h重置</span><input id="inp-c5h-reset" type="text" placeholder="5h" class="glass-input" /></label>
+            </div>
+            <div class="anchor-actions">
+              <button id="btn-clear-anchor" class="ghost-btn compact-btn" type="button">清除同步</button>
+              <button id="btn-save-anchor" class="primary-btn compact-btn" type="button">保存并开始倒计时</button>
+            </div>
+          </div>
+
+          <div id="quota-grid" class="quota-grid"></div>
         </div>
 
         <!-- WINDOW 2 (STANDALONE): Real-Time Context Window -->

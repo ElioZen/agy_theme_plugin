@@ -125,6 +125,7 @@ export const BUILTIN_WALLPAPERS = [
 ];
 
 const SCHEMA_VERSION = 2;
+export const ASSET_VERSION = '3.2.0';
 
 export const DEFAULT_SETTINGS = {
   schemaVersion: SCHEMA_VERSION,
@@ -156,9 +157,16 @@ export const DEFAULT_SETTINGS = {
     followLatest: true,
     windowLimit: 512000,
     statsScope: 'project', // 'project' | 'session' | 'all'
+    sourceFilter: 'all', // 'all' | 'gui' | 'agy-cli' | 'codex-cli'
     range: 'today',
-    includeCliInProject: true,
     showRecentAgents: false,
+  },
+  quotaAnchor: {
+    // Optional user-synced snapshot from Antigravity's native Usage popup
+    gemini5h: null, // { leftPct, resetAtMs, anchoredAtMs }
+    gemini7d: null,
+    claude5h: null,
+    claude7d: null,
   },
   pinnedConversations: [],
 };
