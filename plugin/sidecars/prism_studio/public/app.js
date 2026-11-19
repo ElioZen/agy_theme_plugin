@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_VERSION = '3.6.0';
+  const FRONTEND_VERSION = '3.7.0';
   const COLOR_CHANNELS = [
     { key: 'accent', label: '主强调色' },
     { key: 'secondary', label: '次折射色' },
@@ -15,6 +15,7 @@
   let selectedProjectId = '';
   let manualConversationId = '';
   let contextTargetKey = 'main';
+  let agentsScope = 'project'; // 'project' | 'all'
   let currentPage = 'cockpit';
   let modelsExpanded = false;
   let overviewExpanded = false;
@@ -167,105 +168,153 @@
     return d > 180 ? 360 - d : d;
   }
 
-  function extractPaletteFromUrl(url, lightMode = false) {
+  function computePaletteFromImageSource(imgSource, lightMode = false) {
+    const w = 72;
+    const h = 40;
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(imgSource, 0, 0, w, h);
+    const { data } = ctx.getImageData(0, 0, w, h);
+
+    // 18 hue bins (20 deg each) weighted by colorfulness and mid-tone luminance
+    const bins = Array.from({ length: 18 }, (_, i) => ({
+      idx: i,
+      weight: 0,
+      sumH: 0,
+      sumS: 0,
+      sumL: 0,
+    }));
+    let avgH = 220;
+    let maxW = 0;
+
+    for (let i = 0; i < data.length; i += 4) {
+      const [hu, sat, lum] = rgbToHsl(data[i], data[i + 1], data[i + 2]);
+      if (lum < 0.10 || lum > 0.90 || sat < 0.14) continue;
+      const lumWeight = 1 - Math.abs(lum - 0.52) * 1.45;
+      const weight = Math.max(0.05, sat * sat * Math.max(0.15, lumWeight));
+      const bi = Math.floor((hu % 360) / 20) % 18;
+      const bin = bins[bi];
+      bin.weight += weight;
+      bin.sumH += hu * weight;
+      bin.sumS += sat * weight;
+      bin.sumL += lum * weight;
+      if (bin.weight > maxW) {
+        maxW = bin.weight;
+        avgH = bin.sumH / bin.weight;
+      }
+    }
+
+    const ranked = bins
+      .filter((b) => b.weight > 0.2)
+      .map((b) => ({
+        h: b.sumH / b.weight,
+        s: b.sumS / b.weight,
+        l: b.sumL / b.weight,
+        weight: b.weight,
+      }))
+      .sort((a, b) => b.weight - a.weight);
+
+    const primary = ranked[0] || { h: 216, s: 0.78, l: 0.65 };
+    const secondary =
+      ranked.find((c) => hueDistance(c.h, primary.h) >= 48) || {
+        h: (primary.h + 150) % 360,
+        s: 0.72,
+        l: 0.68,
+      };
+    const tertiary =
+      ranked.find(
+        (c) => hueDistance(c.h, primary.h) >= 48 && hueDistance(c.h, secondary.h) >= 44,
+      ) || {
+        h: (primary.h + 240) % 360,
+        s: 0.68,
+        l: 0.62,
+      };
+
+    const accentS = Math.max(0.58, Math.min(0.88, primary.s * 1.15));
+    const secS = Math.max(0.54, Math.min(0.86, secondary.s * 1.1));
+    const terS = Math.max(0.50, Math.min(0.82, tertiary.s * 1.05));
+
+    if (lightMode) {
+      return {
+        accent: hslToHex(primary.h, accentS, 0.48),
+        secondary: hslToHex(secondary.h, secS, 0.46),
+        tertiary: hslToHex(tertiary.h, terS, 0.40),
+        canvas: hslToHex(avgH, 0.24, 0.94),
+        surface: hslToHex(avgH, 0.22, 0.97),
+        card: '#FFFFFF',
+      };
+    }
+    return {
+      accent: hslToHex(primary.h, accentS, 0.70),
+      secondary: hslToHex(secondary.h, secS, 0.69),
+      tertiary: hslToHex(tertiary.h, terS, 0.60),
+      canvas: hslToHex(avgH, 0.28, 0.08),
+      surface: hslToHex(avgH, 0.28, 0.12),
+      card: hslToHex(avgH, 0.28, 0.16),
+    };
+  }
+
+  function decodeBlobViaDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error('壁纸数据读取失败'));
+      reader.onload = () => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error('壁纸图片解码失败'));
+        img.src = String(reader.result || '');
+      };
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  function decodeSameOriginImage(url) {
     return new Promise((resolve, reject) => {
       const img = new Image();
-      img.crossOrigin = 'anonymous';
-      img.onload = () => {
-        try {
-          const w = 72;
-          const h = 40;
-          const canvas = document.createElement('canvas');
-          canvas.width = w;
-          canvas.height = h;
-          const ctx = canvas.getContext('2d', { willReadFrequently: true });
-          ctx.drawImage(img, 0, 0, w, h);
-          const { data } = ctx.getImageData(0, 0, w, h);
-
-          // 18 hue bins (20 deg each) weighted by colorfulness and mid-tone luminance
-          const bins = Array.from({ length: 18 }, (_, i) => ({
-            idx: i,
-            weight: 0,
-            sumH: 0,
-            sumS: 0,
-            sumL: 0,
-          }));
-          let avgH = 220;
-          let maxW = 0;
-
-          for (let i = 0; i < data.length; i += 4) {
-            const [hu, sat, lum] = rgbToHsl(data[i], data[i + 1], data[i + 2]);
-            if (lum < 0.10 || lum > 0.90 || sat < 0.14) continue;
-            const lumWeight = 1 - Math.abs(lum - 0.52) * 1.45;
-            const weight = Math.max(0.05, sat * sat * Math.max(0.15, lumWeight));
-            const bi = Math.floor((hu % 360) / 20) % 18;
-            const bin = bins[bi];
-            bin.weight += weight;
-            bin.sumH += hu * weight;
-            bin.sumS += sat * weight;
-            bin.sumL += lum * weight;
-            if (bin.weight > maxW) {
-              maxW = bin.weight;
-              avgH = bin.sumH / bin.weight;
-            }
-          }
-
-          const ranked = bins
-            .filter((b) => b.weight > 0.2)
-            .map((b) => ({
-              h: b.sumH / b.weight,
-              s: b.sumS / b.weight,
-              l: b.sumL / b.weight,
-              weight: b.weight,
-            }))
-            .sort((a, b) => b.weight - a.weight);
-
-          const primary = ranked[0] || { h: 216, s: 0.78, l: 0.65 };
-          const secondary =
-            ranked.find((c) => hueDistance(c.h, primary.h) >= 48) || {
-              h: (primary.h + 150) % 360,
-              s: 0.72,
-              l: 0.68,
-            };
-          const tertiary =
-            ranked.find(
-              (c) => hueDistance(c.h, primary.h) >= 48 && hueDistance(c.h, secondary.h) >= 44,
-            ) || {
-              h: (primary.h + 240) % 360,
-              s: 0.68,
-              l: 0.62,
-            };
-
-          const accentS = Math.max(0.58, Math.min(0.88, primary.s * 1.15));
-          const secS = Math.max(0.54, Math.min(0.86, secondary.s * 1.1));
-          const terS = Math.max(0.50, Math.min(0.82, tertiary.s * 1.05));
-
-          if (lightMode) {
-            resolve({
-              accent: hslToHex(primary.h, accentS, 0.48),
-              secondary: hslToHex(secondary.h, secS, 0.46),
-              tertiary: hslToHex(tertiary.h, terS, 0.40),
-              canvas: hslToHex(avgH, 0.24, 0.94),
-              surface: hslToHex(avgH, 0.22, 0.97),
-              card: '#FFFFFF',
-            });
-          } else {
-            resolve({
-              accent: hslToHex(primary.h, accentS, 0.70),
-              secondary: hslToHex(secondary.h, secS, 0.69),
-              tertiary: hslToHex(tertiary.h, terS, 0.60),
-              canvas: hslToHex(avgH, 0.28, 0.08),
-              surface: hslToHex(avgH, 0.28, 0.12),
-              card: hslToHex(avgH, 0.28, 0.16),
-            });
-          }
-        } catch (err) {
-          reject(err);
-        }
-      };
+      img.onload = () => resolve(img);
       img.onerror = () => reject(new Error('壁纸图片加载失败'));
       img.src = url;
     });
+  }
+
+  async function extractPaletteFromUrl(url, lightMode = false) {
+    // Tier 1: Fetch wallpaper bytes via apiFetch (injects X-Sidecar-Token & credentials)
+    // and decode directly via createImageBitmap — immune to crossOrigin CORS, blob:/data: CSP, and tainted canvas!
+    let blob = null;
+    try {
+      const res = await apiFetch(url, { method: 'GET' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      blob = await res.blob();
+    } catch {
+      blob = null;
+    }
+
+    if (blob && blob.size > 0) {
+      if (typeof createImageBitmap === 'function') {
+        try {
+          const bitmap = await createImageBitmap(blob);
+          try {
+            return computePaletteFromImageSource(bitmap, lightMode);
+          } finally {
+            bitmap.close();
+          }
+        } catch {
+          // Fall through to DataURL decoder
+        }
+      }
+      try {
+        const img = await decodeBlobViaDataUrl(blob);
+        return computePaletteFromImageSource(img, lightMode);
+      } catch {
+        // Fall through to plain same-origin image
+      }
+    }
+
+    // Tier 3: Plain same-origin <img> without crossOrigin='anonymous'
+    const img = await decodeSameOriginImage(url);
+    return computePaletteFromImageSource(img, lightMode);
   }
 
   let lastAdaptiveKey = '';
@@ -274,21 +323,25 @@
     const wp = appState?.settings?.wallpaper;
     if (!wp || wp.kind === 'none' || !wp.id) {
       if (force) showToast('当前未启用壁纸');
-      return;
+      return '';
     }
     const key = `${wp.kind}:${wp.id}`;
-    if (!force && key === lastAdaptiveKey) return;
-    lastAdaptiveKey = key;
+    if (!force && key === lastAdaptiveKey) return '';
     const url = `/api/wallpaper?kind=${encodeURIComponent(wp.kind)}&id=${encodeURIComponent(wp.id)}`;
     const lightMode = appState.settings.followHostTheme
       ? hostIsLight
       : isLightColor(appState.settings.colors?.canvas);
     try {
       const palette = await extractPaletteFromUrl(url, lightMode);
+      lastAdaptiveKey = key;
       await queueSaveSettings({ presetId: 'adaptive', colors: palette }, true);
       if (force) showToast('已从当前壁纸提取主题色 ✨');
+      return '';
     } catch (err) {
-      if (force) showToast(`取色失败：${err.message}`);
+      console.error('[prism_studio] adaptive color extraction failed:', err);
+      const msg = err?.message || '图片解码失败';
+      if (force) showToast(`取色失败：${msg}`);
+      return msg;
     }
   }
 
@@ -1090,40 +1143,64 @@
 
     // ========== WINDOW 3: STANDALONE REAL-TIME CONTEXT ==========
     const ctx = telemetry.context;
-    const ag = telemetry.activeAgents;
+    const ag = telemetry.activeAgents || { items: [] };
+    const showRecent = Boolean(telCfg.showRecentAgents);
+    const allAgentsRaw = Array.isArray(ag.items) ? ag.items : [];
+    const scopedAgentsAll =
+      agentsScope === 'project' && telemetry.activeProjectId
+        ? allAgentsRaw.filter((a) => a.projectId === telemetry.activeProjectId)
+        : allAgentsRaw;
+    const nowRefMs = Number(telemetry.updatedAt || Date.now());
+    const LIVE_CUTOFF_MS = 3 * 60 * 1000;
+    const isAgentLive = (a) =>
+      typeof a.isLive === 'boolean'
+        ? a.isLive
+        : Boolean(a.isRunning || a.isStalled || nowRefMs - Number(a.lastActiveMs || 0) <= LIVE_CUTOFF_MS);
+    const scopedAgentsLive = scopedAgentsAll.filter(isAgentLive);
+    const scopedAgentsRecentOnly = scopedAgentsAll.filter((a) => !isAgentLive(a));
+    const scopedAgentsVisible = showRecent ? scopedAgentsAll : scopedAgentsLive;
+
     const ctxTarget = ctx.target || { key: 'main', isMain: true, kindLabel: '主会话', title: activeConv?.title || '当前会话' };
     if (ctxTarget.isMain && contextTargetKey !== 'main') {
       contextTargetKey = 'main';
     }
 
-    const nativePill = $('#ctx-native-limit-pill');
-    const limitGroup = $('#window-limit-group');
-    if (ctx.isNativeLimit) {
-      nativePill.hidden = false;
-      nativePill.textContent = `${formatCompact(ctx.limit)} 原生`;
-      limitGroup.hidden = true;
-    } else {
-      nativePill.hidden = true;
-      limitGroup.hidden = false;
+    const limitPill = $('#ctx-limit-pill');
+    if (limitPill) {
+      const limitTag = ctx.limitSourceLabel || (ctx.isNativeLimit ? '官方识别' : '模型规格');
+      const limitFmt =
+        ctx.limit === 1048576
+          ? '1M (1024k)'
+          : ctx.limit === 1000000
+          ? '1M'
+          : ctx.limit === 131072
+          ? '128k'
+          : formatCompact(ctx.limit);
+      limitPill.textContent = `${limitFmt} · ${limitTag}`;
+      limitPill.className = `badge-pill ${ctx.isNativeLimit ? 'running' : ''}`;
+      const modelLabel = ctx.speed?.rawModel || ctx.speed?.model || '当前模型';
+      limitPill.title = `已自动识别 ${modelLabel} 上下文窗口上限：${formatNumber(ctx.limit)} tokens（来源：${limitTag}）`;
     }
 
     const ctxBar = $('#ctx-target-bar');
     const ctxTargetSel = $('#select-context-target');
     const backMainBtn = $('#btn-ctx-back-main');
-    const hasAgentTargets = (ag?.items || []).length > 0 || !ctxTarget.isMain;
+    const targetCandidates = scopedAgentsAll;
+    const hasAgentTargets = targetCandidates.length > 0 || !ctxTarget.isMain;
     ctxBar.hidden = !hasAgentTargets;
     backMainBtn.hidden = ctxTarget.isMain;
     if (hasAgentTargets) {
       const opts = [
         `<option value="main" ${ctxTarget.isMain ? 'selected' : ''}>主会话 · ${escapeHtml(activeConv?.title || '当前会话')}</option>`,
-        ...(ag.items || []).map((a) => {
-          const titleShort = a.taskTitle ? a.taskTitle.slice(0, 26) : a.shortId;
+        ...targetCandidates.map((a) => {
+          const titleShort = a.taskTitle ? a.taskTitle.slice(0, 24) : a.shortId;
           const pctTxt = typeof a.contextPercent === 'number' ? ` (${a.contextPercent.toFixed(0)}%)` : '';
+          const stateTag = a.isRunning ? '● ' : a.isStalled ? '⚠ ' : '';
           const selected = !ctxTarget.isMain && ctxTarget.key === a.targetKey ? 'selected' : '';
-          return `<option value="${escapeHtml(a.targetKey)}" ${selected}>${escapeHtml(a.kindLabel)} · ${escapeHtml(titleShort)}${pctTxt}</option>`;
+          return `<option value="${escapeHtml(a.targetKey)}" ${selected}>${stateTag}${escapeHtml(a.kindLabel)} · ${escapeHtml(titleShort)}${pctTxt}</option>`;
         }),
       ];
-      if (!ctxTarget.isMain && !(ag.items || []).some((a) => a.targetKey === ctxTarget.key)) {
+      if (!ctxTarget.isMain && !targetCandidates.some((a) => a.targetKey === ctxTarget.key)) {
         opts.push(
           `<option value="${escapeHtml(ctxTarget.key)}" selected>${escapeHtml(ctxTarget.kindLabel)} · ${escapeHtml(ctxTarget.title)}</option>`,
         );
@@ -1154,10 +1231,6 @@
     } else {
       turnCachePill.hidden = true;
     }
-
-    document.querySelectorAll('#window-limit-group .seg-btn').forEach((b) => {
-      b.classList.toggle('active', Number(b.dataset.limit) === Number(ctx.limit));
-    });
 
     const b = ctx.breakdown;
     const items = [
@@ -1227,11 +1300,18 @@
     const runwayEl = $('#ctx-cp-runway');
     const growthEl = $('#ctx-cp-growth');
     const runwayCell = $('#ctx-cell-runway');
+    const cpCeiling = Number(cp.compactionThreshold || ctx.limit || 0);
+    const ceilingNote =
+      cp.compactionThresholdSource === 'observed'
+        ? `上次实测压缩阈值 ${formatCompact(cpCeiling)}`
+        : cp.compactionThresholdSource === 'codex-config'
+        ? `Codex 自动压缩阈值 ${formatCompact(cpCeiling)}`
+        : `窗口上限 ${formatCompact(cpCeiling)}`;
     if (typeof cp.estTurnsToLimit === 'number') {
       runwayEl.textContent = cp.estTurnsToLimit <= 1 ? '即将触发' : `约 ${cp.estTurnsToLimit} 轮`;
       runwayEl.className = cp.estTurnsToLimit <= 5 ? 'is-danger' : cp.estTurnsToLimit <= 15 ? 'is-active-cp' : '';
       growthEl.textContent = cp.avgGrowthPerTurn > 0 ? `+${formatCompact(cp.avgGrowthPerTurn)}/轮` : '';
-      runwayCell.title = `按本周期平均每轮净增 ${formatNumber(cp.avgGrowthPerTurn)} Token 估算，距 ${formatCompact(ctx.limit)} 上限大约还可运行 ${cp.estTurnsToLimit} 轮`;
+      runwayCell.title = `按本周期平均每轮净增 ${formatNumber(cp.avgGrowthPerTurn)} Token 估算，距${ceilingNote}大约还可运行 ${cp.estTurnsToLimit} 轮（窗口总容量 ${formatNumber(ctx.limit)}）`;
     } else {
       runwayEl.textContent = '待采样';
       runwayEl.className = '';
@@ -1270,38 +1350,58 @@
     }
 
     // ========== WINDOW 4: ACTIVE CLI & SUBAGENT LIVE MONITOR ==========
+    document.querySelectorAll('#agents-scope-group .seg-btn').forEach((b) => {
+      b.classList.toggle('active', b.dataset.agentScope === agentsScope);
+    });
+
     const badge = $('#active-agents-badge');
-    const stalledCount = Number(ag.stalledCount || 0);
-    if (stalledCount > 0 && ag.runningCount > 0) {
-      badge.textContent = `${ag.runningCount} 运行中 · ${stalledCount} 疑似卡住`;
+    const runningCount = scopedAgentsAll.filter((a) => a.isRunning).length;
+    const stalledCount = scopedAgentsAll.filter((a) => a.isStalled).length;
+    const recentFinishedLive = scopedAgentsLive.filter((a) => !a.isRunning && !a.isStalled).length;
+    if (stalledCount > 0 && runningCount > 0) {
+      badge.textContent = `${runningCount} 运行中 · ${stalledCount} 疑似卡住`;
       badge.className = 'badge-pill warn';
     } else if (stalledCount > 0) {
       badge.textContent = `${stalledCount} 疑似卡住`;
       badge.className = 'badge-pill warn';
-    } else if (ag.runningCount > 0) {
-      badge.textContent = `${ag.runningCount} 运行中`;
+    } else if (runningCount > 0) {
+      badge.textContent = `${runningCount} 运行中`;
       badge.className = 'badge-pill running';
+    } else if (recentFinishedLive > 0) {
+      badge.textContent = `${recentFinishedLive} 刚完成`;
+      badge.className = 'badge-pill';
     } else {
-      badge.textContent = `${ag.items.length} 活动中`;
+      badge.textContent = '0 运行中';
       badge.className = 'badge-pill';
     }
 
     const recentBtn = $('#btn-toggle-recent-agents');
-    recentBtn.textContent = ag.showRecent ? '仅看活动中' : `近期 1h (${ag.recentHiddenCount})`;
+    const recentHistoryCount = scopedAgentsRecentOnly.length;
+    recentBtn.textContent = showRecent
+      ? `隐藏历史 (${recentHistoryCount})`
+      : `近期 1h (${recentHistoryCount})`;
 
     const listEl = $('#agents-list');
-    if (!ag.items.length) {
+    if (!scopedAgentsVisible.length) {
+      const otherProjTotal = agentsScope === 'project' ? Math.max(0, allAgentsRaw.length - scopedAgentsAll.length) : 0;
+      const scopeHint =
+        agentsScope === 'project'
+          ? `当前项目（${escapeHtml(telemetry.activeProjectName || '项目')}）暂无运行中的 CLI 或子智能体`
+          : '当前暂无运行中的 CLI 或子智能体';
+      const extraHints = [];
+      if (!showRecent && recentHistoryCount > 0) extraHints.push(`近期 1h 有 ${recentHistoryCount} 条历史`);
+      if (otherProjTotal > 0) extraHints.push(`其他项目有 ${otherProjTotal} 条记录，可切「全部项目」`);
       setHtmlIfChanged(
         listEl,
         `
         <div class="empty-agents">
-          当前暂无运行中的 CLI 或子智能体${ag.recentHiddenCount > 0 ? `（可点右上角查看近期 1h 的 ${ag.recentHiddenCount} 个记录）` : ''}
+          ${scopeHint}${extraHints.length ? `（${extraHints.join('；')}）` : ''}
         </div>
       `,
       );
     } else {
-      const visibleAgents = agentsExpanded ? ag.items : ag.items.slice(0, MAX_COLLAPSED_AGENTS);
-      const hiddenAgentsCount = Math.max(0, ag.items.length - MAX_COLLAPSED_AGENTS);
+      const visibleAgents = agentsExpanded ? scopedAgentsVisible : scopedAgentsVisible.slice(0, MAX_COLLAPSED_AGENTS);
+      const hiddenAgentsCount = Math.max(0, scopedAgentsVisible.length - MAX_COLLAPSED_AGENTS);
       setHtmlIfChanged(
         listEl,
         visibleAgents
@@ -1370,7 +1470,7 @@
           .join('') +
           (hiddenAgentsCount > 0
             ? `<button type="button" class="expand-list-btn" data-toggle-expand="agents">${
-                agentsExpanded ? '收起列表 ▴' : `展开其余 ${hiddenAgentsCount} 项（共 ${ag.items.length} 项）▾`
+                agentsExpanded ? '收起列表 ▴' : `展开其余 ${hiddenAgentsCount} 项（共 ${scopedAgentsVisible.length} 项）▾`
               }</button>`
             : ''),
       );
@@ -1404,7 +1504,8 @@
       sourceFilter: tel.sourceFilter || 'all',
       range: tel.range || 'today',
       windowLimit: String(tel.windowLimit || 512000),
-      showRecentAgents: String(Boolean(tel.showRecentAgents)),
+      // Always fetch 1h recent pool so frontend can accurately filter by project & live vs history counts
+      showRecentAgents: 'true',
       contextTarget: contextTargetKey || 'main',
     });
     if (hostConversationId) params.set('hostConversationId', hostConversationId);
@@ -1611,14 +1712,7 @@
       }
     });
 
-    // Window 3: Context controls & target switcher
-    $('#window-limit-group').addEventListener('click', async (e) => {
-      const btn = e.target.closest('.seg-btn');
-      if (!btn) return;
-      await queueSaveSettings({ telemetry: { windowLimit: Number(btn.dataset.limit) } }, true);
-      await loadTelemetry();
-    });
-
+    // Window 3: Context target switcher (window limit is auto-detected dynamically)
     $('#select-context-target').addEventListener('change', async (e) => {
       contextTargetKey = e.target.value || 'main';
       await loadTelemetry();
@@ -1631,10 +1725,18 @@
     });
 
     // Window 4: Active CLI & Subagent controls
+    $('#agents-scope-group').addEventListener('click', (e) => {
+      const btn = e.target.closest('.seg-btn');
+      if (!btn) return;
+      agentsScope = btn.dataset.agentScope === 'all' ? 'all' : 'project';
+      agentsExpanded = false;
+      renderCockpit();
+    });
+
     $('#btn-toggle-recent-agents').addEventListener('click', async () => {
       const next = !Boolean(appState.settings.telemetry?.showRecentAgents);
       await queueSaveSettings({ telemetry: { showRecentAgents: next } }, true);
-      await loadTelemetry();
+      renderCockpit();
     });
 
     // Expand / collapse handlers for models & active agents lists
@@ -1773,7 +1875,8 @@
       if (!card) return;
       await queueSaveSettings({ wallpaper: { kind: card.dataset.wpKind, id: card.dataset.wpId, onlineMeta: null } }, true);
       if (appState?.settings?.adaptiveTheme) {
-        await applyAdaptiveColorsFromCurrentWallpaper(false);
+        const extractErr = await applyAdaptiveColorsFromCurrentWallpaper(false);
+        if (extractErr) showToast(`已切换壁纸，但自动取色失败：${extractErr}`);
       }
     });
 
@@ -1798,11 +1901,16 @@
         const payload = await res.json();
         appState = payload;
         renderStudio();
+        let extractErr = '';
         if (appState?.settings?.adaptiveTheme) {
-          await applyAdaptiveColorsFromCurrentWallpaper(false);
+          extractErr = (await applyAdaptiveColorsFromCurrentWallpaper(false)) || '';
         }
         const meta = payload.fetched?.meta;
-        showToast(`已切换「${meta?.name || '在线壁纸'}」(${meta?.sourceLabel || '开源图库'})`);
+        showToast(
+          extractErr
+            ? `已切换壁纸，但自动取色失败：${extractErr}`
+            : `已切换「${meta?.name || '在线壁纸'}」(${meta?.sourceLabel || '开源图库'})`,
+        );
       } catch (err) {
         showToast(err.message || '开源图库拉取失败');
       } finally {
@@ -1836,10 +1944,11 @@
       const pool = all.filter((w) => !(w.kind === cur.kind && w.id === cur.id));
       const pick = (pool.length ? pool : all)[Math.floor(Math.random() * (pool.length ? pool.length : all.length))];
       await queueSaveSettings({ wallpaper: { kind: pick.kind, id: pick.id, onlineMeta: null } }, true);
+      let extractErr = '';
       if (appState?.settings?.adaptiveTheme) {
-        await applyAdaptiveColorsFromCurrentWallpaper(false);
+        extractErr = (await applyAdaptiveColorsFromCurrentWallpaper(false)) || '';
       }
-      showToast(`已切换壁纸「${pick.name}」`);
+      showToast(extractErr ? `已切换壁纸，但自动取色失败：${extractErr}` : `已切换壁纸「${pick.name}」`);
     });
 
     $('#btn-clear-wp').addEventListener('click', () => {
@@ -1865,10 +1974,11 @@
           }
           appState = await res.json();
           renderStudio();
+          let extractErr = '';
           if (appState?.settings?.adaptiveTheme) {
-            await applyAdaptiveColorsFromCurrentWallpaper(false);
+            extractErr = (await applyAdaptiveColorsFromCurrentWallpaper(false)) || '';
           }
-          showToast('自定义壁纸已应用');
+          showToast(extractErr ? `壁纸已应用，但自动取色失败：${extractErr}` : '自定义壁纸已应用');
         } catch (err) {
           showToast(err.message);
         } finally {

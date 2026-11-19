@@ -125,7 +125,7 @@ export const BUILTIN_WALLPAPERS = [
 ];
 
 const SCHEMA_VERSION = 3;
-export const ASSET_VERSION = '3.6.0';
+export const ASSET_VERSION = '3.7.0';
 
 export const DEFAULT_SETTINGS = {
   schemaVersion: SCHEMA_VERSION,
@@ -184,6 +184,7 @@ function deepMerge(base, patch) {
       typeof val === 'object' &&
       !Array.isArray(val) &&
       base &&
+      base[key] &&
       typeof base[key] === 'object' &&
       !Array.isArray(base[key])
     ) {

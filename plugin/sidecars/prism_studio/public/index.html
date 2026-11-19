@@ -131,13 +131,8 @@
           <div class="card-header">
             <div class="title-with-badge">
               <h2 class="card-title">实时上下文窗口</h2>
-              <span id="ctx-native-limit-pill" class="badge-pill running" hidden>原生窗口</span>
             </div>
-            <div class="seg-group" id="window-limit-group">
-              <button class="seg-btn" data-limit="200000">200k</button>
-              <button class="seg-btn active" data-limit="512000">512k</button>
-              <button class="seg-btn" data-limit="1000000">1M</button>
-            </div>
+            <span id="ctx-limit-pill" class="badge-pill running" title="已根据当前模型与运行时配置动态识别上下文窗口大小">自动识别</span>
           </div>
 
           <div class="ctx-target-bar" id="ctx-target-bar" hidden>
@@ -175,7 +170,7 @@
               <div class="token-headline-row">
                 <div class="token-headline tabular">
                   <strong id="ctx-used">0</strong>
-                  <span class="muted"> / <span id="ctx-limit">512,000</span></span>
+                  <span class="muted"> / <span id="ctx-limit">—</span></span>
                 </div>
                 <span id="ctx-turn-cache-pill" class="badge-pill" hidden></span>
               </div>
@@ -235,12 +230,18 @@
 
         <!-- WINDOW 4: Active CLI & Subagent Monitor -->
         <div class="glass-card">
-          <div class="card-header">
+          <div class="card-header wrap-header">
             <div class="title-with-badge">
               <h2 class="card-title">活动 CLI 与子智能体</h2>
-              <span id="active-agents-badge" class="badge-pill">0 活动中</span>
+              <span id="active-agents-badge" class="badge-pill">0 运行中</span>
             </div>
-            <button id="btn-toggle-recent-agents" class="ghost-btn compact-btn" type="button">近期 1h (0)</button>
+            <div class="header-actions">
+              <div class="seg-group" id="agents-scope-group">
+                <button class="seg-btn active" data-agent-scope="project">当前项目</button>
+                <button class="seg-btn" data-agent-scope="all">全部项目</button>
+              </div>
+              <button id="btn-toggle-recent-agents" class="ghost-btn compact-btn" type="button">近期 1h (0)</button>
+            </div>
           </div>
           <div id="agents-list" class="agents-list"></div>
         </div>

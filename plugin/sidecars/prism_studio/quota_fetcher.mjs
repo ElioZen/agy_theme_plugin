@@ -9,6 +9,7 @@ import {
   readdirSync,
   renameSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
@@ -85,6 +86,97 @@ finally:
     except OSError:
         pass
 `;
+
+const PYTHON_MODEL_PROBE_RUNNER = `
+import json, os, pty, select, subprocess, sys, time
+
+agy_bin, model_id, settings_json, out_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+if os.path.exists(out_path):
+    try:
+        os.remove(out_path)
+    except OSError:
+        pass
+
+master, slave = pty.openpty()
+proc = subprocess.Popen(
+    [agy_bin, "--project", "default-cli-project", "--model", model_id, "--settings", settings_json],
+    stdin=slave,
+    stdout=slave,
+    stderr=slave,
+    close_fds=True,
+)
+os.close(slave)
+
+deadline = time.time() + 7.5
+try:
+    while time.time() < deadline:
+        r, _, _ = select.select([master], [], [], 0.15)
+        if r:
+            try:
+                os.read(master, 4096)
+            except OSError:
+                break
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 20:
+            try:
+                with open(out_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if data.get("context_window", {}).get("context_window_size"):
+                    break
+            except Exception:
+                pass
+finally:
+    try:
+        os.write(master, b"\\x04\\x04")
+        proc.wait(timeout=1.5)
+    except Exception:
+        try:
+            proc.terminate()
+            proc.wait(timeout=1.5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    try:
+        os.close(master)
+    except OSError:
+        pass
+`;
+
+function extractModelFamilyKey(name) {
+  const s = String(name || '')
+    .toLowerCase()
+    .replace(/[\s_()]+/g, '-');
+  if (!s) return '';
+  if (s.includes('claude')) {
+    const tier = s.includes('opus') ? 'opus' : s.includes('sonnet') ? 'sonnet' : s.includes('haiku') ? 'haiku' : 'other';
+    const vm = s.match(/(\d+)[.-](\d+)/);
+    return `claude-${tier}${vm ? `-${vm[1]}.${vm[2]}` : ''}`;
+  }
+  if (s.includes('orchestrator')) {
+    if (s.includes('neon')) return 'gemini-orchestrator-neon';
+    if (s.includes('argon')) return 'gemini-orchestrator-argon';
+    return 'gemini-orchestrator-carbon';
+  }
+  if (s.includes('gemini')) {
+    if (s.includes('neon')) return 'gemini-neon';
+    if (s.includes('carbon')) return 'gemini-carbon';
+    if (s.includes('argon')) return 'gemini-argon';
+    if (s.includes('hydrogen')) return 'gemini-hydrogen';
+    if (s.includes('flash')) return 'gemini-flash';
+    return 'gemini';
+  }
+  if (s.includes('gpt-oss')) return 'gpt-oss';
+  if (s.includes('gpt-')) return 'gpt';
+  return '';
+}
+
+function normalizeProbeModelArg(rawModel) {
+  const clean = String(rawModel || '').trim();
+  if (!clean) return '';
+  // e.g. gemini-4-hydrogen-tiered-high -> gemini-4-hydrogen-high
+  return clean.replace(/-tiered(?=-|$)/i, '');
+}
 
 // ==================== CODEX OFFICIAL RATE-LIMIT READER ====================
 const codexRateLimitFileCache = new Map();
@@ -335,6 +427,7 @@ export class AgyQuotaFetcher {
   #storage;
   #cachePath;
   #historyPath;
+  #modelCtxPath;
   #captureScriptPath;
   #livePayloadPath;
   #inFlight = null;
@@ -342,15 +435,22 @@ export class AgyQuotaFetcher {
   #lastError = '';
   #cached = null;
   #history = {};
+  #modelCtxCache = {};
+  #modelProbeQueue = [];
+  #modelProbeQueuedSet = new Set();
+  #modelProbing = false;
 
   constructor(storage) {
     this.#storage = storage;
     this.#cachePath = join(storage.dataDir, 'quota_cache.json');
     this.#historyPath = join(storage.dataDir, 'quota_history.json');
+    this.#modelCtxPath = join(storage.dataDir, 'model_context_cache.json');
     this.#captureScriptPath = join(storage.dataDir, 'quota_capture.sh');
     this.#livePayloadPath = join(storage.dataDir, 'quota_live.json');
     this.#loadCache();
     this.#loadHistory();
+    this.#loadModelCtxCache();
+    this.#seedModelCtxFromLiveFile();
   }
 
   #loadCache() {
@@ -370,6 +470,198 @@ export class AgyQuotaFetcher {
       }
     } catch {
       this.#history = {};
+    }
+  }
+
+  #loadModelCtxCache() {
+    try {
+      if (existsSync(this.#modelCtxPath)) {
+        this.#modelCtxCache = JSON.parse(readFileSync(this.#modelCtxPath, 'utf-8')) || {};
+      }
+    } catch {
+      this.#modelCtxCache = {};
+    }
+  }
+
+  #saveModelCtxCache() {
+    try {
+      const tmp = `${this.#modelCtxPath}.tmp.${process.pid}.${Date.now()}`;
+      writeFileSync(tmp, JSON.stringify(this.#modelCtxCache, null, 2), 'utf-8');
+      renameSync(tmp, this.#modelCtxPath);
+    } catch {
+      // ignore
+    }
+  }
+
+  #recordModelCtxFromRaw(raw, requestedModel = '') {
+    const size = Number(raw?.context_window?.context_window_size || 0);
+    if (!Number.isFinite(size) || size < 4096) return false;
+    const returnedName = String(raw?.model?.display_name || raw?.model?.id || '').trim();
+    const returnedFam = extractModelFamilyKey(returnedName);
+    const nowMs = Date.now();
+    let changed = false;
+
+    if (returnedFam) {
+      this.#modelCtxCache[`family:${returnedFam}`] = {
+        limit: size,
+        displayName: returnedName,
+        fetchedAtMs: nowMs,
+      };
+      changed = true;
+    }
+
+    if (requestedModel) {
+      const reqKey = requestedModel.toLowerCase();
+      const reqFam = extractModelFamilyKey(requestedModel);
+      if (reqFam && returnedFam && reqFam === returnedFam) {
+        this.#modelCtxCache[reqKey] = {
+          limit: size,
+          displayName: returnedName || requestedModel,
+          fetchedAtMs: nowMs,
+        };
+        changed = true;
+      } else {
+        // agy fell back to default model because requestedModel is legacy/unknown; remember so we don't loop
+        this.#modelCtxCache[reqKey] = {
+          limit: 0,
+          unmatched: true,
+          returnedName,
+          fetchedAtMs: nowMs,
+        };
+        changed = true;
+      }
+    }
+
+    if (changed) this.#saveModelCtxCache();
+    return changed;
+  }
+
+  #seedModelCtxFromLiveFile() {
+    try {
+      if (existsSync(this.#livePayloadPath)) {
+        const raw = JSON.parse(readFileSync(this.#livePayloadPath, 'utf-8'));
+        if (raw) this.#recordModelCtxFromRaw(raw);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  getModelContextWindow(rawModel) {
+    const key = String(rawModel || '').trim().toLowerCase();
+    if (!key) return null;
+    const nowMs = Date.now();
+    const TTL_MS = 24 * 60 * 60 * 1000;
+    const UNMATCHED_TTL_MS = 6 * 60 * 60 * 1000;
+
+    const exact = this.#modelCtxCache[key];
+    if (exact) {
+      if (exact.limit > 0 && nowMs - Number(exact.fetchedAtMs || 0) < TTL_MS) {
+        return {
+          limit: exact.limit,
+          source: 'agy-official',
+          displayName: exact.displayName || rawModel,
+          fetchedAtMs: exact.fetchedAtMs,
+        };
+      }
+      if (exact.unmatched && nowMs - Number(exact.fetchedAtMs || 0) < UNMATCHED_TTL_MS) {
+        return null;
+      }
+    }
+
+    const fam = extractModelFamilyKey(key);
+    const famEntry = fam ? this.#modelCtxCache[`family:${fam}`] : null;
+    if (famEntry && famEntry.limit > 0 && nowMs - Number(famEntry.fetchedAtMs || 0) < TTL_MS) {
+      return {
+        limit: famEntry.limit,
+        source: 'agy-official',
+        displayName: famEntry.displayName || rawModel,
+        fetchedAtMs: famEntry.fetchedAtMs,
+      };
+    }
+
+    // Queue non-blocking background official probe for recognized AGY model IDs
+    if (fam && !key.includes('placeholder') && !key.startsWith('gpt-5') && !key.startsWith('gpt-6')) {
+      this.#enqueueModelProbe(rawModel);
+    }
+    return null;
+  }
+
+  #enqueueModelProbe(rawModel) {
+    const key = String(rawModel || '').trim().toLowerCase();
+    if (!key || this.#modelProbeQueuedSet.has(key)) return;
+    this.#modelProbeQueuedSet.add(key);
+    this.#modelProbeQueue.push(String(rawModel).trim());
+    this.#drainModelProbeQueue();
+  }
+
+  #drainModelProbeQueue() {
+    if (this.#modelProbing || this.#modelProbeQueue.length === 0) return;
+    this.#modelProbing = true;
+    const rawModel = this.#modelProbeQueue.shift();
+    const key = rawModel.toLowerCase();
+    const probeArg = normalizeProbeModelArg(rawModel);
+    const probeOut = join(this.#storage.dataDir, `model_ctx_probe_${process.pid}.json`);
+    const probeSh = join(this.#storage.dataDir, `model_ctx_probe_${process.pid}.sh`);
+
+    const finish = () => {
+      for (const p of [probeOut, `${probeOut}.tmp`, probeSh]) {
+        try {
+          if (existsSync(p)) unlinkSync(p);
+        } catch {
+          // ignore
+        }
+      }
+      this.#modelProbeQueuedSet.delete(key);
+      this.#modelProbing = false;
+      if (this.#modelProbeQueue.length > 0) {
+        setTimeout(() => this.#drainModelProbeQueue(), 120);
+      }
+    };
+
+    try {
+      const script = `#!/usr/bin/env bash\ncat > "${probeOut}.tmp" && mv "${probeOut}.tmp" "${probeOut}"\necho "ok"\n`;
+      writeFileSync(probeSh, script, 'utf-8');
+      chmodSync(probeSh, 0o755);
+
+      const agyBin = findAgyBinary();
+      const settingsJson = JSON.stringify({
+        statusLine: { type: 'command', command: probeSh, enabled: true },
+      });
+
+      const child = spawn('python3', ['-c', PYTHON_MODEL_PROBE_RUNNER, agyBin, probeArg, settingsJson, probeOut], {
+        stdio: ['ignore', 'ignore', 'ignore'],
+        env: {
+          ...process.env,
+          PATH: `${join(homedir(), '.local', 'bin')}:/opt/homebrew/bin:/usr/local/bin:${process.env.PATH || ''}`,
+        },
+      });
+
+      const hardKill = setTimeout(() => {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          // ignore
+        }
+      }, 11000);
+
+      child.on('exit', () => {
+        clearTimeout(hardKill);
+        try {
+          if (existsSync(probeOut)) {
+            const raw = JSON.parse(readFileSync(probeOut, 'utf-8'));
+            this.#recordModelCtxFromRaw(raw, rawModel);
+          } else {
+            this.#modelCtxCache[key] = { limit: 0, unmatched: true, fetchedAtMs: Date.now() };
+            this.#saveModelCtxCache();
+          }
+        } catch {
+          // ignore
+        }
+        finish();
+      });
+    } catch {
+      finish();
     }
   }
 
@@ -485,6 +777,7 @@ export class AgyQuotaFetcher {
           try {
             if (existsSync(this.#livePayloadPath)) {
               const raw = JSON.parse(readFileSync(this.#livePayloadPath, 'utf-8'));
+              if (raw) this.#recordModelCtxFromRaw(raw);
               if (raw && raw.quota && typeof raw.quota === 'object' && Object.keys(raw.quota).length > 0) {
                 const nowMs = Date.now();
                 const snap = {

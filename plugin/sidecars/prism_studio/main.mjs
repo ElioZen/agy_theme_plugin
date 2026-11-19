@@ -93,7 +93,10 @@ app.api(
     const mime = MIME_BY_EXT[extname(filePath).toLowerCase()] || 'image/jpeg';
     return new Response(readFileSync(filePath), {
       contentType: mime,
-      headers: { 'Cache-Control': kind === 'online' ? 'no-store' : 'public, max-age=86400' },
+      headers: {
+        'Cache-Control': kind === 'online' ? 'no-store' : 'public, max-age=86400',
+        'Access-Control-Allow-Origin': '*',
+      },
     });
   },
   'GET',
@@ -272,6 +275,7 @@ app.api(
       range,
       windowLimit,
       showRecentAgents,
+      resolveModelContextWindow: (rawModel) => quotaFetcher.getModelContextWindow(rawModel),
     });
     return {
       ...snap,

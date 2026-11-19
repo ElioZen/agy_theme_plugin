@@ -1252,19 +1252,113 @@ function getRangeCutoffMs(range) {
   return 0;
 }
 
-function buildContextSnapshotFromSource(source, { isCodex = false, fallbackLimit = 512000, nowMs = Date.now(), targetMeta = null } = {}) {
+let codexConfigCache = { key: '', data: { modelContextWindow: 0, autoCompactLimit: 0 } };
+
+function readCodexConfigLimits() {
+  const cfgPath = join(homedir(), '.codex', 'config.toml');
+  if (!existsSync(cfgPath)) return codexConfigCache.data;
+  try {
+    const st = statSync(cfgPath);
+    const key = `${st.mtimeMs}:${st.size}`;
+    if (codexConfigCache.key === key) return codexConfigCache.data;
+    const raw = readFileSync(cfgPath, 'utf-8');
+    const ctxMatch = raw.match(/^\s*model_context_window\s*=\s*(\d+)/m);
+    const cpMatch = raw.match(/^\s*model_auto_compact_token_limit\s*=\s*(\d+)/m);
+    const data = {
+      modelContextWindow: ctxMatch ? Number(ctxMatch[1]) : 0,
+      autoCompactLimit: cpMatch ? Number(cpMatch[1]) : 0,
+    };
+    codexConfigCache = { key, data };
+    return data;
+  } catch {
+    return codexConfigCache.data;
+  }
+}
+
+function inferModelSpecContextLimit(rawModel) {
+  const m = String(rawModel || '').toLowerCase();
+  if (!m) return 0;
+  if (m.includes('gpt-oss-120b')) return 131072;
+  if (m.includes('gemini-4') || m.includes('gemini-3') || m.includes('gemini-2.5') || m.includes('orchestrator')) {
+    return 1048576;
+  }
+  if (m.includes('claude-opus-5') || m.includes('claude-sonnet-5')) return 1000000;
+  if (m.includes('claude')) return 200000;
+  if (m.includes('gpt-6') || m.includes('gpt-5')) {
+    return readCodexConfigLimits().modelContextWindow || 1000000;
+  }
+  return 0;
+}
+
+function resolveDynamicContextLimit({
+  source = null,
+  rawModel = '',
+  isCodex = false,
+  usedTokens = 0,
+  fallbackLimit = 1048576,
+  resolveModelContextWindow = null,
+} = {}) {
+  if (isCodex) {
+    const sessionLimit = Number(source?.contextWindowLimit || 0);
+    if (sessionLimit >= 32000) {
+      return { limit: sessionLimit, isNativeLimit: true, limitSource: 'codex-session', limitSourceLabel: 'Codex 原生' };
+    }
+    const cfgLimit = readCodexConfigLimits().modelContextWindow;
+    if (cfgLimit >= 32000) {
+      return { limit: cfgLimit, isNativeLimit: true, limitSource: 'codex-config', limitSourceLabel: 'Codex 配置' };
+    }
+  }
+
+  if (!isCodex && typeof resolveModelContextWindow === 'function' && rawModel) {
+    const official = resolveModelContextWindow(rawModel);
+    if (official && Number(official.limit) >= 32000) {
+      return {
+        limit: Number(official.limit),
+        isNativeLimit: true,
+        limitSource: 'agy-official',
+        limitSourceLabel: '官方识别',
+      };
+    }
+  }
+
+  let spec = inferModelSpecContextLimit(rawModel) || Math.max(32000, Number(fallbackLimit) || 1048576);
+  // Safety step-up if observed usage already exceeds estimated spec
+  if (usedTokens > spec) {
+    const steps = [200000, 524288, 1000000, 1048576, 2097152];
+    const nextStep = steps.find((s) => s >= usedTokens);
+    spec = nextStep || Math.ceil(usedTokens * 1.15);
+  }
+  return {
+    limit: spec,
+    isNativeLimit: false,
+    limitSource: 'model-spec',
+    limitSourceLabel: '模型规格',
+  };
+}
+
+function buildContextSnapshotFromSource(
+  source,
+  { isCodex = false, fallbackLimit = 1048576, nowMs = Date.now(), targetMeta = null, resolveModelContextWindow = null } = {},
+) {
   const turns = source?.turns || [];
   const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
   const nonCheckpointTurns = turns.filter((t) => !t.isCheckpoint);
   const latestModelTurn = nonCheckpointTurns.length > 0 ? nonCheckpointTurns[nonCheckpointTurns.length - 1] : null;
+  const rawModel = source?.lastModel || latestModelTurn?.model || latestTurn?.model || '';
 
-  const nativeLimit = isCodex && Number(source?.contextWindowLimit || 0) > 0 ? Number(source.contextWindowLimit) : 0;
-  const limit = nativeLimit || Math.max(32000, Number(fallbackLimit) || 512000);
   const usedTokens = isCodex
     ? Number(source?.lastContextTokens || latestModelTurn?.contextTokens || latestTurn?.contextTokens || 0)
     : latestTurn
     ? Number(latestTurn.contextTokens || 0)
     : 0;
+  const { limit, isNativeLimit, limitSource, limitSourceLabel } = resolveDynamicContextLimit({
+    source,
+    rawModel,
+    isCodex,
+    usedTokens,
+    fallbackLimit,
+    resolveModelContextWindow,
+  });
   const usedPercent = Math.min(100, Math.round((usedTokens / limit) * 1000) / 10);
   const remainingTokens = Math.max(0, limit - usedTokens);
 
@@ -1314,6 +1408,27 @@ function buildContextSnapshotFromSource(source, { isCodex = false, fallbackLimit
     0,
   );
 
+  const preTokens = lastCp?.preTokens || 0;
+  const postTokens = lastCp?.postTokens || lastCp?.summaryTokens || 0;
+  const freedPercent =
+    preTokens > 0 && postTokens > 0 && preTokens > postTokens
+      ? Math.round(((preTokens - postTokens) / preTokens) * 1000) / 10
+      : null;
+
+  // Determine realistic auto-compaction trigger ceiling (observed checkpoint peak or Codex auto-compact config)
+  let compactionThreshold = limit;
+  let compactionThresholdSource = 'window-limit';
+  if (preTokens >= 180000 && preTokens < limit * 0.9 && usedTokens < preTokens * 1.08) {
+    compactionThreshold = preTokens;
+    compactionThresholdSource = 'observed';
+  } else if (isCodex) {
+    const cfgAutoCp = readCodexConfigLimits().autoCompactLimit;
+    if (cfgAutoCp >= 64000 && cfgAutoCp < limit) {
+      compactionThreshold = cfgAutoCp;
+      compactionThresholdSource = 'codex-config';
+    }
+  }
+
   let lastCpTurnIdx = -1;
   for (let i = turns.length - 1; i >= 0; i -= 1) {
     if (turns[i].isCheckpoint) {
@@ -1338,16 +1453,10 @@ function buildContextSnapshotFromSource(source, { isCodex = false, fallbackLimit
     }
     if (avgDelta >= 50) {
       avgGrowthPerTurn = Math.round(avgDelta);
-      estTurnsToLimit = Math.max(0, Math.round(remainingTokens / avgDelta));
+      const tokensToCompact = Math.max(0, compactionThreshold - usedTokens);
+      estTurnsToLimit = Math.max(0, Math.round(tokensToCompact / avgDelta));
     }
   }
-
-  const preTokens = lastCp?.preTokens || 0;
-  const postTokens = lastCp?.postTokens || lastCp?.summaryTokens || 0;
-  const freedPercent =
-    preTokens > 0 && postTokens > 0 && preTokens > postTokens
-      ? Math.round(((preTokens - postTokens) / preTokens) * 1000) / 10
-      : null;
 
   let sessUncached = 0;
   let sessCache = 0;
@@ -1374,6 +1483,8 @@ function buildContextSnapshotFromSource(source, { isCodex = false, fallbackLimit
     preTokens,
     postTokens,
     freedPercent,
+    compactionThreshold,
+    compactionThresholdSource,
     avgGrowthPerTurn,
     estTurnsToLimit,
     effectiveInputRatio,
@@ -1390,14 +1501,15 @@ function buildContextSnapshotFromSource(source, { isCodex = false, fallbackLimit
     speedPoints.length > 0
       ? Math.round((speedPoints.reduce((acc, p) => acc + p.rate, 0) / speedPoints.length) * 10) / 10
       : 0;
-  const rawModel = source?.lastModel || latestModelTurn?.model || latestTurn?.model || '';
   const explicitEffort = isCodex ? source?.lastEffort || source?.effort || '' : '';
   const parsedLastModel = parseModelAndEffort(rawModel, explicitEffort);
 
   return {
     used: usedTokens,
     limit,
-    isNativeLimit: nativeLimit > 0,
+    isNativeLimit,
+    limitSource,
+    limitSourceLabel,
     percent: usedPercent,
     remaining: remainingTokens,
     target: targetMeta || {
@@ -1439,9 +1551,10 @@ export function buildTelemetrySnapshot({
   statsScope = 'project', // 'project' | 'session' | 'all'
   sourceFilter = 'all', // 'all' | 'gui' | 'agy-cli' | 'codex-cli'
   range = 'today',
-  windowLimit = 512000,
+  windowLimit = 1048576,
   showRecentAgents = false,
   quotaAnchor = {},
+  resolveModelContextWindow = null,
 } = {}) {
   const appDataDir = resolveAppDataDir();
   const desktopBrainDir = join(appDataDir, 'brain');
@@ -1744,7 +1857,12 @@ export function buildTelemetrySnapshot({
     const { baseModel, effort } = parseModelAndEffort(cs.model, cs.effort);
     const { taskTitle, rawTaskTitle } = buildChineseTaskTitle({ prompt: cs.firstUserPrompt });
     const promptTot = cs.uncachedInput + cs.cacheRead;
-    const ctxSnap = buildContextSnapshotFromSource(cs, { isCodex: true, fallbackLimit: windowLimit, nowMs });
+    const ctxSnap = buildContextSnapshotFromSource(cs, {
+      isCodex: true,
+      fallbackLimit: windowLimit,
+      nowMs,
+      resolveModelContextWindow,
+    });
     liveAgents.push({
       id: cs.id,
       shortId: cs.shortId,
@@ -1755,6 +1873,7 @@ export function buildTelemetrySnapshot({
       projectName: cs.projectName,
       taskTitle,
       rawTaskTitle,
+      isLive,
       isRunning,
       isStalled,
       stalledMinutes: isStalled ? Math.floor(age / 60000) : 0,
@@ -1803,7 +1922,12 @@ export function buildTelemetrySnapshot({
       dbTitle: s?.explicitTitle || '',
       prompt: parsed.firstUserPrompt,
     });
-    const ctxSnap = buildContextSnapshotFromSource(parsed, { isCodex: false, fallbackLimit: windowLimit, nowMs });
+    const ctxSnap = buildContextSnapshotFromSource(parsed, {
+      isCodex: false,
+      fallbackLimit: windowLimit,
+      nowMs,
+      resolveModelContextWindow,
+    });
     liveAgents.push({
       id: cid,
       shortId: cid.slice(0, 8),
@@ -1814,6 +1938,7 @@ export function buildTelemetrySnapshot({
       projectName: proj.name,
       taskTitle,
       rawTaskTitle,
+      isLive,
       isRunning,
       isStalled,
       stalledMinutes: isStalled ? Math.floor(age / 60000) : 0,
@@ -1869,7 +1994,12 @@ export function buildTelemetrySnapshot({
       role: desc?.role || '',
       prompt: parsed?.firstUserPrompt || '',
     });
-    const ctxSnap = buildContextSnapshotFromSource(parsed, { isCodex: false, fallbackLimit: windowLimit, nowMs });
+    const ctxSnap = buildContextSnapshotFromSource(parsed, {
+      isCodex: false,
+      fallbackLimit: windowLimit,
+      nowMs,
+      resolveModelContextWindow,
+    });
     liveAgents.push({
       id: cid,
       shortId: cid.slice(0, 8),
@@ -1880,6 +2010,7 @@ export function buildTelemetrySnapshot({
       projectName: proj.name,
       taskTitle,
       rawTaskTitle,
+      isLive,
       isRunning,
       isStalled,
       stalledMinutes: isStalled ? Math.floor(age / 60000) : 0,
@@ -1929,6 +2060,7 @@ export function buildTelemetrySnapshot({
           isCodex: true,
           fallbackLimit: windowLimit,
           nowMs,
+          resolveModelContextWindow,
           targetMeta: {
             key: `codex-cli:${cs.id}`,
             isMain: false,
@@ -1952,6 +2084,7 @@ export function buildTelemetrySnapshot({
           isCodex: false,
           fallbackLimit: windowLimit,
           nowMs,
+          resolveModelContextWindow,
           targetMeta: {
             key: `agy-cli:${tId}`,
             isMain: false,
@@ -1977,6 +2110,7 @@ export function buildTelemetrySnapshot({
           isCodex: false,
           fallbackLimit: windowLimit,
           nowMs,
+          resolveModelContextWindow,
           targetMeta: {
             key: `gui-subagent:${tId}`,
             isMain: false,
@@ -1995,6 +2129,7 @@ export function buildTelemetrySnapshot({
       isCodex: false,
       fallbackLimit: windowLimit,
       nowMs,
+      resolveModelContextWindow,
       targetMeta: {
         key: 'main',
         isMain: true,
@@ -2029,7 +2164,7 @@ export function buildTelemetrySnapshot({
     quotas,
     context: contextSnapshot,
     activeAgents: {
-      items: liveAgents.slice(0, 12),
+      items: liveAgents.slice(0, 40),
       runningCount: liveAgents.filter((a) => a.isRunning).length,
       stalledCount: liveAgents.filter((a) => a.isStalled).length,
       recentHiddenCount,
