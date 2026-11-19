@@ -1096,16 +1096,18 @@
       { label: '用户与对话', value: b.dialog, color: 'var(--prism-tertiary)' },
       { label: '工具与输出', value: b.tools, color: '#C084FC' },
     ];
+    const usedBase = Math.max(1, ctx.used || items.reduce((s, it) => s + Number(it.value || 0), 0));
     $('#breakdown-list').innerHTML = items
       .map((it) => {
-        const pct = ctx.limit > 0 ? Math.min(100, (it.value / ctx.limit) * 100) : 0;
+        const shareUsed = ctx.used > 0 ? Math.min(100, (it.value / usedBase) * 100) : 0;
+        const shareLimit = ctx.limit > 0 ? Math.min(100, (it.value / ctx.limit) * 100) : 0;
         return `
-          <div class="breakdown-item">
+          <div class="breakdown-item" title="${it.label}：占当前上下文 ${shareUsed.toFixed(1)}% · 占窗口上限 ${shareLimit.toFixed(1)}%">
             <div class="breakdown-top">
               <span>${it.label}</span>
-              <strong class="tabular">${formatCompact(it.value)}</strong>
+              <strong class="tabular">${formatCompact(it.value)} <span class="muted">${shareUsed.toFixed(1)}%</span></strong>
             </div>
-            <div class="breakdown-bar"><span style="width:${Math.max(pct, it.value > 0 ? 4 : 0)}%;background:${it.color}"></span></div>
+            <div class="breakdown-bar"><span style="width:${Math.max(shareUsed, it.value > 0 ? 4 : 0)}%;background:${it.color}"></span></div>
           </div>
         `;
       })
