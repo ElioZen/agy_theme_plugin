@@ -742,8 +742,12 @@
     });
 
     $('#btn-refresh').addEventListener('click', async () => {
-      await Promise.all([loadState(), loadTelemetry()]);
-      showToast('已刷新');
+      try {
+        await Promise.all([loadState(), loadTelemetry()]);
+        showToast('已刷新');
+      } catch {
+        showToast('连接已重置，请关闭并重开驾驶舱标签页');
+      }
     });
 
     $('#btn-follow-latest').addEventListener('click', async () => {
@@ -826,37 +830,50 @@
 
     $('#btn-save-anchor').addEventListener('click', async () => {
       const payload = {
-        g7dPct: $('#inp-g7d-pct').value,
-        g7dReset: $('#inp-g7d-reset').value,
-        g5hPct: $('#inp-g5h-pct').value,
-        g5hReset: $('#inp-g5h-reset').value,
-        c7dPct: $('#inp-c7d-pct').value,
-        c7dReset: $('#inp-c7d-reset').value,
-        c5hPct: $('#inp-c5h-pct').value,
-        c5hReset: $('#inp-c5h-reset').value,
+        g7dPct: $('#inp-g7d-pct').value.trim(),
+        g7dReset: $('#inp-g7d-reset').value.trim(),
+        g5hPct: $('#inp-g5h-pct').value.trim(),
+        g5hReset: $('#inp-g5h-reset').value.trim(),
+        c7dPct: $('#inp-c7d-pct').value.trim(),
+        c7dReset: $('#inp-c7d-reset').value.trim(),
+        c5hPct: $('#inp-c5h-pct').value.trim(),
+        c5hReset: $('#inp-c5h-reset').value.trim(),
       };
-      const res = await apiFetch('/api/quota-anchor', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      });
-      if (res.ok) {
+      if (!payload.g7dPct && !payload.g5hPct && !payload.c7dPct && !payload.c5hPct) {
+        showToast('请至少填入一项剩余百分比');
+        return;
+      }
+      try {
+        const res = await apiFetch('/api/quota-anchor', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+          const errText = await res.text().catch(() => '');
+          throw new Error(`HTTP ${res.status}${errText ? ': ' + errText.slice(0, 60) : ''}`);
+        }
         appState = await res.json();
         $('#quota-anchor-editor').hidden = true;
         await loadTelemetry();
-        showToast('已同步官方剩余额度并开启实时倒计时');
+        showToast('已校准额度并开启倒计时');
+      } catch (err) {
+        showToast(`保存失败（${err.message}），请重开驾驶舱标签页`);
       }
     });
 
     $('#btn-clear-anchor').addEventListener('click', async () => {
-      const res = await apiFetch('/api/quota-anchor', {
-        method: 'POST',
-        body: JSON.stringify({ clear: true }),
-      });
-      if (res.ok) {
+      try {
+        const res = await apiFetch('/api/quota-anchor', {
+          method: 'POST',
+          body: JSON.stringify({ clear: true }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         appState = await res.json();
         $('#quota-anchor-editor').hidden = true;
         await loadTelemetry();
-        showToast('已清除同步快照，恢复纯本地统计');
+        showToast('已清空校准数据');
+      } catch (err) {
+        showToast(`操作失败（${err.message}）`);
       }
     });
 
@@ -1073,13 +1090,18 @@
   async function init() {
     setPage('cockpit');
     bindEvents();
+    // Never block init on getWorkspaceUris() — onWorkspaceChange updates it asynchronously
+    // without risking an infinite hang after iframe reload!
     if (window.sidecar?.getWorkspaceUris) {
-      try {
-        const uris = await window.sidecar.getWorkspaceUris();
-        if (Array.isArray(uris) && uris.length > 0) activeWorkspaceUri = uris[0];
-      } catch {
-        // ignore
-      }
+      window.sidecar
+        .getWorkspaceUris()
+        .then((uris) => {
+          if (Array.isArray(uris) && uris.length > 0 && uris[0] !== activeWorkspaceUri) {
+            activeWorkspaceUri = uris[0];
+            if (appState?.settings?.telemetry?.followLatest !== false) loadTelemetry();
+          }
+        })
+        .catch(() => {});
     }
     await loadState();
     await loadTelemetry();
