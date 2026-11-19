@@ -31,6 +31,19 @@ export function resolveAppDataDir() {
 
 export const BUILTIN_PRESETS = [
   {
+    id: 'midnight-train',
+    name: '星海暖灯',
+    mode: 'dark',
+    colors: {
+      accent: '#6EA8FF',
+      secondary: '#F4B860',
+      tertiary: '#38D9A9',
+      canvas: '#0E121B',
+      surface: '#141B2B',
+      card: '#192236',
+    },
+  },
+  {
     id: 'aurora-sapphire',
     name: '星海极光',
     mode: 'dark',
@@ -41,19 +54,6 @@ export const BUILTIN_PRESETS = [
       canvas: '#0C1222',
       surface: '#141D33',
       card: '#1B2642',
-    },
-  },
-  {
-    id: 'midnight-train',
-    name: '星海暖灯',
-    mode: 'dark',
-    colors: {
-      accent: '#6EA8FF',
-      secondary: '#F4B860',
-      tertiary: '#38D9A9',
-      canvas: '#0B101D',
-      surface: '#131A2D',
-      card: '#1A233A',
     },
   },
   {
@@ -124,55 +124,47 @@ export const BUILTIN_WALLPAPERS = [
   },
 ];
 
+const SCHEMA_VERSION = 2;
+
 export const DEFAULT_SETTINGS = {
-  language: 'zh-CN',
+  schemaVersion: SCHEMA_VERSION,
   presetId: 'midnight-train',
   followHostTheme: false,
-  colors: { ...BUILTIN_PRESETS[1].colors },
+  colors: { ...BUILTIN_PRESETS[0].colors },
   customPresets: [],
   wallpaper: {
     kind: 'builtin', // 'builtin' | 'custom' | 'none'
     id: 'starry-ocean-train',
-    opacity: 92,
-    blur: 14,
-    darkness: 38,
-    radius: 16,
-    fit: 'cover', // 'cover' | 'contain'
+    opacity: 100,
+    blur: 4,
+    darkness: 6,
+    radius: 12,
+    fit: 'cover',
   },
   companion: {
     enabled: false,
-    opacity: 26,
+    opacity: 62,
     blur: 0,
-    vignette: 28,
+    vignette: 18,
     onlyWhenFrontmost: true,
     fit: 'cover',
-    blendStyle: 'crisp', // 'crisp' | 'soft'
+    blendStyle: 'screen', // 'screen' | 'soft'
     glassRim: true,
+    seamlessRightPane: true,
   },
   telemetry: {
     followLatest: true,
     windowLimit: 512000,
-    scope: 'all',
     range: 'today',
+    subagentScope: 'all', // 'all' | 'current'
+  },
+  quotaBudgets: {
+    gemini5h: 60_000_000,
+    gemini7d: 500_000_000,
+    claude5h: 15_000_000,
+    claude7d: 120_000_000,
   },
   pinnedConversations: [],
-  quickPrompts: [
-    {
-      id: 'zh-only',
-      title: '本轮简体中文回复',
-      body: '请全程使用自然简洁的简体中文回复，代码标识符与命令保持原文。',
-    },
-    {
-      id: 'review-diff',
-      title: '代码改动快速审查',
-      body: '请检查当前工作区的 git diff，重点指出潜在 bug、边界条件和可优化点，用简体中文简要列出。',
-    },
-    {
-      id: 'summarize-progress',
-      title: '总结当前进展',
-      body: '请用 5 条以内的要点总结目前已完成的内容、未完成事项以及下一步建议。',
-    },
-  ],
 };
 
 function deepMerge(base, patch) {
@@ -223,7 +215,21 @@ export class PrismStorage {
     try {
       if (existsSync(this.settingsPath)) {
         const raw = JSON.parse(readFileSync(this.settingsPath, 'utf-8'));
-        return deepMerge(DEFAULT_SETTINGS, raw);
+        const merged = deepMerge(DEFAULT_SETTINGS, raw);
+        // One-time smooth migration from v1 heavy-blur/dark defaults to v2 ultra-clear glass + screen blend
+        if ((raw.schemaVersion || 1) < SCHEMA_VERSION) {
+          merged.schemaVersion = SCHEMA_VERSION;
+          if (merged.wallpaper.blur === 14) merged.wallpaper.blur = 4;
+          if (merged.wallpaper.darkness === 38) merged.wallpaper.darkness = 6;
+          if (merged.wallpaper.opacity === 92) merged.wallpaper.opacity = 100;
+          if (merged.companion.blendStyle === 'crisp') merged.companion.blendStyle = 'screen';
+          if (merged.companion.opacity <= 30) merged.companion.opacity = 62;
+          if (merged.companion.vignette === 32 || merged.companion.vignette === 28) merged.companion.vignette = 18;
+          merged.companion.seamlessRightPane = true;
+          this.#writeAtomic(this.settingsPath, JSON.stringify(merged, null, 2));
+          this.syncCompanionConfig(merged);
+        }
+        return merged;
       }
     } catch (err) {
       console.error('[prism_studio] Failed to load settings, using defaults:', err.message);
@@ -234,13 +240,14 @@ export class PrismStorage {
   saveSettings(patch) {
     const current = this.loadSettings();
     const merged = deepMerge(current, patch);
+    merged.schemaVersion = SCHEMA_VERSION;
     this.#writeAtomic(this.settingsPath, JSON.stringify(merged, null, 2));
     this.syncCompanionConfig(merged);
     return merged;
   }
 
   resetColors() {
-    const preset = BUILTIN_PRESETS[1];
+    const preset = BUILTIN_PRESETS[0];
     return this.saveSettings({
       presetId: preset.id,
       followHostTheme: false,
@@ -266,27 +273,18 @@ export class PrismStorage {
   saveCustomWallpaper(name, dataUrl) {
     this.#ensureDirs();
     const match = /^data:image\/(png|jpeg|jpg|webp);base64,([A-Za-z0-9+/=\s]+)$/i.exec(String(dataUrl || ''));
-    if (!match) {
-      throw new Error('仅支持 PNG、JPG 或 WEBP 图片格式');
-    }
+    if (!match) throw new Error('仅支持 PNG、JPG 或 WEBP 图片格式');
     const ext = match[1].toLowerCase() === 'jpeg' ? 'jpg' : match[1].toLowerCase();
     const buf = Buffer.from(match[2].replace(/\s+/g, ''), 'base64');
-    if (buf.length > 15 * 1024 * 1024) {
-      throw new Error('图片大小不能超过 15MB');
-    }
-    const safeBase = String(name || 'wallpaper')
-      .replace(/\.[^.]+$/, '')
-      .replace(/[^\p{L}\p{N}_-]+/gu, '_')
-      .slice(0, 36) || 'wallpaper';
+    if (buf.length > 15 * 1024 * 1024) throw new Error('图片大小不能超过 15MB');
+    const safeBase =
+      String(name || 'wallpaper')
+        .replace(/\.[^.]+$/, '')
+        .replace(/[^\p{L}\p{N}_-]+/gu, '_')
+        .slice(0, 36) || 'wallpaper';
     const file = `${Date.now()}-${safeBase}.${ext}`;
-    const fullPath = join(this.customWallpapersDir, file);
-    writeFileSync(fullPath, buf);
-    return {
-      id: file,
-      name: safeBase,
-      file,
-      kind: 'custom',
-    };
+    writeFileSync(join(this.customWallpapersDir, file), buf);
+    return { id: file, name: safeBase, file, kind: 'custom' };
   }
 
   deleteCustomWallpaper(id) {
@@ -318,14 +316,14 @@ export class PrismStorage {
     const payload = {
       enabled: Boolean(settings.companion?.enabled),
       imagePath: wpPath,
-      opacity: Math.max(0.05, Math.min(0.65, Number(settings.companion?.opacity ?? 22) / 100)),
+      opacity: Math.max(0.08, Math.min(0.92, Number(settings.companion?.opacity ?? 62) / 100)),
       blur: Math.max(0, Math.min(24, Number(settings.companion?.blur ?? 0))),
-      vignette: Math.max(0, Math.min(0.85, Number(settings.companion?.vignette ?? 32) / 100)),
+      vignette: Math.max(0, Math.min(0.80, Number(settings.companion?.vignette ?? 18) / 100)),
       cornerRadius: 12,
       onlyWhenFrontmost: settings.companion?.onlyWhenFrontmost !== false,
       fit: settings.companion?.fit || settings.wallpaper?.fit || 'cover',
-      blendStyle: settings.companion?.blendStyle || 'crisp',
-      tintHex: settings.colors?.canvas || '#0B101D',
+      blendStyle: settings.companion?.blendStyle === 'soft' ? 'soft' : 'screen',
+      tintHex: settings.colors?.canvas || '#0E121B',
       accentHex: settings.colors?.accent || '#6EA8FF',
       glassRim: settings.companion?.glassRim !== false,
       updatedAt: Date.now(),

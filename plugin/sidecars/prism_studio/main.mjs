@@ -47,7 +47,6 @@ function buildStatePayload(settings = storage.loadSettings()) {
   };
 }
 
-// Gracefully clean up macOS companion helper on exit
 function cleanup() {
   companion.stop();
 }
@@ -63,7 +62,6 @@ process.on('SIGINT', () => {
 
 const app = new SidecarApp();
 
-// Static frontend routes
 app.page('/', () => readPublicFile('index.html'));
 app.page('/styles.css', () => readPublicFile('styles.css'));
 app.page('/app.js', () => readPublicFile('app.js'));
@@ -75,7 +73,6 @@ app.page('/logo.svg', () => {
   });
 });
 
-// Serve built-in or custom wallpapers
 app.api(
   '/api/wallpaper',
   (data) => {
@@ -94,7 +91,6 @@ app.api(
   'GET',
 );
 
-// Initial state + settings
 app.api('/api/state', () => buildStatePayload(), 'GET');
 
 app.api('/api/settings', async (data) => {
@@ -109,7 +105,6 @@ app.api('/api/reset-colors', async () => {
   return buildStatePayload(updated);
 });
 
-// Custom presets
 app.api('/api/presets/save', (data) => {
   const name = String(data?.name || '').trim().slice(0, 24);
   if (!name) throw new Error('请输入配色方案名称');
@@ -139,14 +134,10 @@ app.api('/api/presets/delete', (data) => {
   return buildStatePayload(updated);
 });
 
-// Custom wallpapers
 app.api('/api/wallpapers/upload', async (data) => {
   const saved = storage.saveCustomWallpaper(data?.name, data?.dataUrl);
   const updated = storage.saveSettings({
-    wallpaper: {
-      kind: 'custom',
-      id: saved.id,
-    },
+    wallpaper: { kind: 'custom', id: saved.id },
   });
   await companion.syncWithSettings(updated);
   return { uploaded: saved, ...buildStatePayload(updated) };
@@ -166,7 +157,6 @@ app.api('/api/wallpapers/delete', async (data) => {
   return buildStatePayload(updated);
 });
 
-// Pin / unpin conversation
 app.api('/api/pin', (data) => {
   const id = String(data?.conversationId || '');
   if (!id) throw new Error('缺少会话 ID');
@@ -178,27 +168,6 @@ app.api('/api/pin', (data) => {
   return buildStatePayload(updated);
 });
 
-// Quick Prompts CRUD
-app.api('/api/prompts/save', (data) => {
-  const title = String(data?.title || '').trim().slice(0, 32);
-  const body = String(data?.body || '').trim().slice(0, 2000);
-  if (!title || !body) throw new Error('请填写快捷指令标题和内容');
-  const current = storage.loadSettings();
-  const prompt = { id: `prompt-${Date.now()}`, title, body };
-  const quickPrompts = [prompt, ...(current.quickPrompts || [])].slice(0, 20);
-  const updated = storage.saveSettings({ quickPrompts });
-  return buildStatePayload(updated);
-});
-
-app.api('/api/prompts/delete', (data) => {
-  const id = String(data?.id || '');
-  const current = storage.loadSettings();
-  const quickPrompts = (current.quickPrompts || []).filter((p) => p.id !== id);
-  const updated = storage.saveSettings({ quickPrompts });
-  return buildStatePayload(updated);
-});
-
-// macOS Companion control
 app.api('/api/companion', async (data) => {
   const action = String(data?.action || '');
   const current = storage.loadSettings();
@@ -212,14 +181,9 @@ app.api('/api/companion', async (data) => {
     companion.stop();
     return buildStatePayload(updated);
   }
-  if (action === 'precompile') {
-    await companion.ensureCompiled();
-    return buildStatePayload(current);
-  }
   return buildStatePayload(current);
 });
 
-// Real-time telemetry
 app.api(
   '/api/telemetry',
   (data) => {
@@ -228,23 +192,32 @@ app.api(
       data.followLatest !== undefined
         ? data.followLatest === 'true' || data.followLatest === true
         : settings.telemetry.followLatest;
-    const scope = data.scope === 'current' ? 'current' : data.scope === 'all' ? 'all' : settings.telemetry.scope;
-    const range = ['today', '7d', '30d', 'all'].includes(data.range) ? data.range : settings.telemetry.range;
+    const range = ['today', '7d', '30d', 'all'].includes(data.range)
+      ? data.range
+      : settings.telemetry.range || 'today';
     const windowLimit = Number(data.windowLimit || settings.telemetry.windowLimit || 512000);
     const conversationId = String(data.conversationId || '');
+    const hostConversationId = String(data.hostConversationId || '');
+    const activeWorkspaceUri = String(data.activeWorkspaceUri || '');
+    const projectFilter = String(data.projectFilter || '');
+    const includeSubagentsInSession =
+      data.includeSubagents === 'true' || data.includeSubagents === true;
 
     return buildTelemetrySnapshot({
       conversationId,
+      hostConversationId,
+      activeWorkspaceUri,
+      projectFilter,
       followLatest,
-      scope,
+      includeSubagentsInSession,
       range,
       windowLimit,
+      quotaBudgets: settings.quotaBudgets || {},
     });
   },
   'GET',
 );
 
-// Boot server & auto-start companion if user previously left it enabled
 await app.run();
 const initialSettings = storage.loadSettings();
 storage.syncCompanionConfig(initialSettings);
@@ -253,6 +226,5 @@ if (initialSettings.companion?.enabled) {
     console.error('[prism_studio] Companion auto-start failed:', err.message);
   });
 } else if (process.platform === 'darwin') {
-  // Pre-warm Swift binary quietly in background so first toggle is instant
   companion.ensureCompiled().catch(() => {});
 }

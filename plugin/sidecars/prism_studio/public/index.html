@@ -11,25 +11,20 @@
   <!-- Atmospheric Layers -->
   <div id="wallpaper-layer" class="wallpaper-layer" aria-hidden="true"></div>
   <div id="scrim-layer" class="scrim-layer" aria-hidden="true"></div>
-  <div class="ambient-orbs" aria-hidden="true">
-    <span class="orb orb-1"></span>
-    <span class="orb orb-2"></span>
-  </div>
 
   <!-- Main Shell -->
   <div class="app-shell">
-    <!-- Top Glass Navigation Bar -->
+    <!-- Top Ultra-Clear Glass Bar -->
     <header class="topbar glass-surface">
       <div class="topbar-left">
         <img src="/logo.svg" alt="棱镜星轨" class="brand-logo" />
         <nav class="nav-tabs" role="tablist">
           <button class="nav-tab active" data-tab="cockpit" role="tab" aria-selected="true">驾驶舱</button>
           <button class="nav-tab" data-tab="studio" role="tab" aria-selected="false">外观美化</button>
-          <button class="nav-tab" data-tab="workbench" role="tab" aria-selected="false">效率台</button>
         </nav>
       </div>
       <div class="topbar-right">
-        <button id="btn-top-companion" class="toggle-chip top-comp-btn" type="button" title="一键开关 macOS 整窗壁纸氛围伴侣">
+        <button id="btn-top-companion" class="toggle-chip top-comp-btn" type="button" title="一键开关 macOS 整窗星光贴背壁纸">
           <span class="status-dot"></span>
           <span>整窗氛围</span>
         </button>
@@ -41,21 +36,27 @@
     <main class="main-scroll">
       <!-- ==================== TAB 1: COCKPIT ==================== -->
       <section id="tab-cockpit" class="tab-panel active">
-        <!-- Session Selector Bar -->
-        <div class="glass-card compact-row session-bar">
-          <button id="btn-follow-latest" class="toggle-chip active" type="button">
-            <span class="status-dot"></span>
-            <span>跟随最新</span>
-          </button>
-          <select id="select-conversation" class="glass-select" aria-label="选择会话"></select>
-          <span id="active-status-pill" class="badge-pill">就绪</span>
+        <!-- Project & Conversation Switcher -->
+        <div class="glass-card switcher-card">
+          <div class="switcher-row">
+            <button id="btn-follow-latest" class="toggle-chip active" type="button" title="自动跟随 Antigravity 当前打开的会话与工作区">
+              <span class="status-dot"></span>
+              <span>跟随当前</span>
+            </button>
+            <select id="select-project" class="glass-select project-select" aria-label="切换项目"></select>
+            <span id="active-status-pill" class="badge-pill">就绪</span>
+          </div>
+          <div class="switcher-row">
+            <select id="select-conversation" class="glass-select" aria-label="切换会话"></select>
+            <button id="btn-jump-conv" class="ghost-btn compact-btn" type="button" title="在主窗口切换到该会话">跳转</button>
+          </div>
         </div>
 
-        <!-- Hero Card: Context Ring Gauge -->
-        <div class="glass-card hero-context-card">
+        <!-- 1. Hero Context Ring + Current Session Model Share -->
+        <div class="glass-card">
           <div class="card-header">
             <div>
-              <h2 class="card-title">上下文窗口占用</h2>
+              <h2 class="card-title">上下文窗口与本会话模型占比</h2>
               <p class="card-sub" id="context-subtitle">实时读取本地会话轨迹</p>
             </div>
             <div class="seg-group" id="window-limit-group">
@@ -66,7 +67,6 @@
           </div>
 
           <div class="context-hero-body">
-            <!-- Luminous SVG Ring -->
             <div class="ring-wrap">
               <svg class="context-ring" viewBox="0 0 120 120">
                 <defs>
@@ -76,7 +76,7 @@
                     <stop offset="100%" stop-color="var(--prism-tertiary)" />
                   </linearGradient>
                   <filter id="ringGlow" x="-20%" y="-20%" width="140%" height="140%">
-                    <feGaussianBlur stdDeviation="2.6" result="blur" />
+                    <feGaussianBlur stdDeviation="2.4" result="blur" />
                     <feMerge>
                       <feMergeNode in="blur" />
                       <feMergeNode in="SourceGraphic" />
@@ -92,7 +92,6 @@
               </div>
             </div>
 
-            <!-- Breakdown Metrics -->
             <div class="context-breakdown">
               <div class="token-headline tabular">
                 <strong id="ctx-used">0</strong>
@@ -101,57 +100,104 @@
               <div class="breakdown-list" id="breakdown-list"></div>
             </div>
           </div>
+
+          <!-- Per-Session Model Ratio -->
+          <div class="sub-divider"></div>
+          <div class="session-share-head">
+            <div class="session-share-title">
+              <span>本会话模型用量比例</span>
+              <span id="session-total-badge" class="muted tabular">0 tokens</span>
+            </div>
+            <label class="inline-check" id="wrap-include-sub">
+              <input id="chk-include-subagents" type="checkbox" />
+              <span id="label-include-sub">含子智能体 (0)</span>
+            </label>
+          </div>
+          <div id="session-ratio-bar" class="ratio-bar"></div>
+          <div id="session-models-list" class="ratio-legend"></div>
         </div>
 
-        <!-- Model Telemetry & Speed Sparkline -->
-        <div class="glass-card telemetry-card">
-          <div class="card-header">
-            <h2 class="card-title">速率与缓存遥测</h2>
-            <span id="last-model-badge" class="model-chip">—</span>
-          </div>
-
-          <div class="telemetry-grid">
-            <div class="metric-block">
-              <div class="metric-label">缓存命中率</div>
-              <div class="metric-value tabular" id="metric-cache-rate">0%</div>
-              <div class="mini-bar-track">
-                <div class="mini-bar-fill tertiary" id="metric-cache-bar" style="width:0%"></div>
-              </div>
-            </div>
-            <div class="metric-block">
-              <div class="metric-label">生成速率</div>
-              <div class="metric-value tabular">
-                <span id="metric-speed">0</span>
-                <span class="metric-unit">tok/s</span>
-              </div>
-              <div class="metric-sub tabular" id="metric-speed-avg">均值 — tok/s</div>
-            </div>
-            <div class="sparkline-block">
-              <svg id="speed-sparkline" class="sparkline-svg" viewBox="0 0 180 46" preserveAspectRatio="none"></svg>
-            </div>
-          </div>
-        </div>
-
-        <!-- Model Token & Cost Breakdown -->
-        <div class="glass-card usage-card">
+        <!-- 2. Quota Refresh Windows (5h & Weekly for Gemini + Claude/GPT) -->
+        <div class="glass-card">
           <div class="card-header wrap-header">
             <div>
-              <h2 class="card-title">模型 Token 用量</h2>
+              <h2 class="card-title">额度滚动窗口与刷新监控</h2>
+              <p class="card-sub">本地精确统计 5 小时 / 每周（7 天）滑动消耗与最早释放倒计时</p>
+            </div>
+            <button id="btn-quota-settings" class="ghost-btn compact-btn" type="button">参考上限</button>
+          </div>
+
+          <div id="quota-budget-editor" class="budget-editor" hidden>
+            <div class="budget-grid">
+              <label><span>Gemini 5h 参考(M)</span><input id="inp-g5h" type="number" min="1" step="5" class="glass-input" /></label>
+              <label><span>Gemini 周 参考(M)</span><input id="inp-g7d" type="number" min="10" step="50" class="glass-input" /></label>
+              <label><span>Claude 5h 参考(M)</span><input id="inp-c5h" type="number" min="1" step="5" class="glass-input" /></label>
+              <label><span>Claude 周 参考(M)</span><input id="inp-c7d" type="number" min="10" step="20" class="glass-input" /></label>
+            </div>
+            <div class="budget-actions">
+              <button id="btn-save-budgets" class="primary-btn compact-btn" type="button">保存参考上限</button>
+            </div>
+          </div>
+
+          <div id="quota-grid" class="quota-grid"></div>
+
+          <!-- Compact Speed & Cache Telemetry Strip -->
+          <div class="sub-divider"></div>
+          <div class="telemetry-grid">
+            <div class="metric-block">
+              <div class="metric-label">本会话缓存命中</div>
+              <div class="metric-value tabular" id="metric-cache-rate">0%</div>
+            </div>
+            <div class="metric-block">
+              <div class="metric-label">实时生成速率</div>
+              <div class="metric-value tabular">
+                <span id="metric-speed">—</span><span class="metric-unit">tok/s</span>
+              </div>
+              <div class="metric-sub tabular" id="metric-speed-avg">均值 —</div>
+            </div>
+            <div class="sparkline-block">
+              <svg id="speed-sparkline" class="sparkline-svg" viewBox="0 0 180 42" preserveAspectRatio="none"></svg>
+            </div>
+          </div>
+          <div class="upstream-strip">
+            <span class="muted">最近上游模型</span>
+            <span id="last-model-badge" class="model-chip">—</span>
+          </div>
+        </div>
+
+        <!-- 3. Subagent Live Monitor (Includes parallel projects' subagents!) -->
+        <div class="glass-card">
+          <div class="card-header wrap-header">
+            <div>
+              <div class="title-with-badge">
+                <h2 class="card-title">子智能体实时监控</h2>
+                <span id="subagent-count-badge" class="badge-pill">0 个</span>
+              </div>
+              <p class="card-sub">同步追踪跨项目主会话派生的子智能体状态、步数与 Token 消耗</p>
+            </div>
+            <div class="seg-group" id="subagent-scope-group">
+              <button class="seg-btn active" data-subscope="all">全部项目</button>
+              <button class="seg-btn" data-subscope="current">当前项目</button>
+            </div>
+          </div>
+          <div id="subagents-list" class="subagents-list"></div>
+        </div>
+
+        <!-- 4. Project-Level Overall Statistics & Model Breakdown -->
+        <div class="glass-card">
+          <div class="card-header wrap-header">
+            <div>
+              <h2 class="card-title">项目整体统计与模型占比</h2>
               <div class="usage-totals tabular">
-                <strong id="usage-total-tokens">0</strong>
-                <span class="cost-pill" id="usage-total-cost">≈ $0.00</span>
+                <strong id="overall-total-tokens">0</strong>
+                <span class="cost-pill" id="overall-total-cost">≈ $0.00</span>
               </div>
             </div>
-            <div class="filter-controls">
-              <div class="seg-group" id="usage-scope-group">
-                <button class="seg-btn active" data-scope="all">全部</button>
-                <button class="seg-btn" data-scope="current">当前</button>
-              </div>
-              <div class="seg-group" id="usage-range-group">
-                <button class="seg-btn active" data-range="today">今天</button>
-                <button class="seg-btn" data-range="7d">近7天</button>
-                <button class="seg-btn" data-range="30d">近30天</button>
-              </div>
+            <div class="seg-group" id="usage-range-group">
+              <button class="seg-btn active" data-range="today">今天</button>
+              <button class="seg-btn" data-range="7d">近7天</button>
+              <button class="seg-btn" data-range="30d">近30天</button>
+              <button class="seg-btn" data-range="all">全部</button>
             </div>
           </div>
 
@@ -161,14 +207,14 @@
             <span><i class="dot secondary"></i>输出 <strong id="sum-output">0</strong></span>
           </div>
 
-          <div id="models-list" class="models-list"></div>
-          <p class="footnote">* 费用按公开 API 单价估算，本地只读统计，不消耗额外额度。</p>
+          <div id="projects-list" class="projects-list"></div>
+          <p class="footnote">* 项目统计自动归并主会话及其子智能体消耗；点击任意项目可快速切换筛选。</p>
         </div>
       </section>
 
       <!-- ==================== TAB 2: THEME STUDIO ==================== -->
       <section id="tab-studio" class="tab-panel">
-        <!-- macOS Full-Window Backdrop Companion (Top priority!) -->
+        <!-- macOS Full-Window Backdrop Companion -->
         <div class="glass-card companion-card">
           <div class="card-header wrap-header">
             <div>
@@ -176,7 +222,7 @@
                 <h2 class="card-title">macOS 整窗氛围伴侣</h2>
                 <span id="companion-status-badge" class="badge-pill">准备就绪</span>
               </div>
-              <p class="card-sub">将壁纸与液态玻璃光边延展到整个 Antigravity 窗口，鼠标完全穿透、切应用自动隐藏</p>
+              <p class="card-sub">星光滤色引擎：星海与电车无缝贯穿左右窗口，同时保持代码与文字锐利不发灰</p>
             </div>
             <button id="btn-toggle-companion" class="primary-btn" type="button">开启整窗伴侣</button>
           </div>
@@ -184,17 +230,17 @@
           <div class="sliders-grid">
             <label class="slider-item">
               <div class="slider-head">
-                <span>整窗壁纸浓度</span>
-                <strong id="val-comp-opacity" class="tabular">26%</strong>
+                <span>整窗壁纸亮度</span>
+                <strong id="val-comp-opacity" class="tabular">62%</strong>
               </div>
-              <input id="range-comp-opacity" type="range" min="8" max="55" value="26" />
+              <input id="range-comp-opacity" type="range" min="15" max="90" value="62" />
             </label>
             <label class="slider-item">
               <div class="slider-head">
-                <span>边缘护眼暗角</span>
-                <strong id="val-comp-vignette" class="tabular">28%</strong>
+                <span>边缘柔光衰减</span>
+                <strong id="val-comp-vignette" class="tabular">18%</strong>
               </div>
-              <input id="range-comp-vignette" type="range" min="0" max="75" value="28" />
+              <input id="range-comp-vignette" type="range" min="0" max="75" value="18" />
             </label>
             <label class="slider-item">
               <div class="slider-head">
@@ -205,13 +251,25 @@
             </label>
             <div class="checkbox-stack">
               <label class="checkbox-item">
+                <input id="chk-comp-seamless" type="checkbox" checked />
+                <span>左右窗口壁纸无缝贯穿</span>
+              </label>
+              <label class="checkbox-item">
                 <input id="chk-comp-rim" type="checkbox" checked />
                 <span>液态玻璃窗框高光</span>
               </label>
               <label class="checkbox-item">
                 <input id="chk-comp-frontmost" type="checkbox" checked />
-                <span>切到其他应用时自动隐藏</span>
+                <span>切到其他应用自动隐藏</span>
               </label>
+            </div>
+          </div>
+
+          <div class="fit-row">
+            <span class="fit-label">混合模式</span>
+            <div class="seg-group" id="comp-blend-group">
+              <button class="seg-btn active" data-blend="screen">星光滤色（推荐）</button>
+              <button class="seg-btn" data-blend="soft">柔雾透叠</button>
             </div>
           </div>
           <p id="companion-error" class="error-text" hidden></p>
@@ -238,30 +296,30 @@
             <label class="slider-item">
               <div class="slider-head">
                 <span>侧栏壁纸透明度</span>
-                <strong id="val-wp-opacity" class="tabular">92%</strong>
+                <strong id="val-wp-opacity" class="tabular">100%</strong>
               </div>
-              <input id="range-wp-opacity" type="range" min="0" max="100" value="92" />
+              <input id="range-wp-opacity" type="range" min="0" max="100" value="100" />
             </label>
             <label class="slider-item">
               <div class="slider-head">
                 <span>玻璃磨砂模糊</span>
-                <strong id="val-wp-blur" class="tabular">14px</strong>
+                <strong id="val-wp-blur" class="tabular">4px</strong>
               </div>
-              <input id="range-wp-blur" type="range" min="0" max="28" value="14" />
+              <input id="range-wp-blur" type="range" min="0" max="24" value="4" />
             </label>
             <label class="slider-item">
               <div class="slider-head">
-                <span>暗度护眼遮罩</span>
-                <strong id="val-wp-darkness" class="tabular">38%</strong>
+                <span>暗度遮罩</span>
+                <strong id="val-wp-darkness" class="tabular">6%</strong>
               </div>
-              <input id="range-wp-darkness" type="range" min="0" max="85" value="38" />
+              <input id="range-wp-darkness" type="range" min="0" max="80" value="6" />
             </label>
             <label class="slider-item">
               <div class="slider-head">
                 <span>卡片圆角柔化</span>
-                <strong id="val-wp-radius" class="tabular">16px</strong>
+                <strong id="val-wp-radius" class="tabular">12px</strong>
               </div>
-              <input id="range-wp-radius" type="range" min="6" max="24" value="16" />
+              <input id="range-wp-radius" type="range" min="4" max="22" value="12" />
             </label>
           </div>
 
@@ -298,59 +356,6 @@
           </div>
 
           <div id="color-pickers" class="color-grid"></div>
-        </div>
-      </section>
-
-      <!-- ==================== TAB 3: WORKBENCH ==================== -->
-      <section id="tab-workbench" class="tab-panel">
-        <!-- Multi-project Session Radar -->
-        <div class="glass-card sessions-card">
-          <div class="card-header">
-            <div>
-              <h2 class="card-title">多项目会话监视</h2>
-              <p class="card-sub">实时查看并发项目运行状态，支持置顶与一键切换</p>
-            </div>
-            <span class="badge-pill running" id="running-count-badge">0 运行中</span>
-          </div>
-          <div id="sessions-list" class="sessions-list"></div>
-        </div>
-
-        <!-- Quick New Conversation Launcher -->
-        <div class="glass-card">
-          <div class="card-header">
-            <div>
-              <h2 class="card-title">快捷发起新对话</h2>
-              <p class="card-sub">无需离开当前页面，指定模型直接新开任务</p>
-            </div>
-            <select id="select-new-model" class="glass-select compact-select">
-              <option value="flash">Gemini Flash</option>
-              <option value="pro">Gemini Pro</option>
-            </select>
-          </div>
-          <textarea id="input-new-conv" class="glass-textarea" rows="2" placeholder="输入新任务说明，直接发起一条新对话..."></textarea>
-          <div class="action-footer">
-            <button id="btn-start-conv" class="primary-btn" type="button">+ 发起新对话</button>
-          </div>
-        </div>
-
-        <!-- Quick Prompts -->
-        <div class="glass-card">
-          <div class="card-header">
-            <div>
-              <h2 class="card-title">常用指令模板</h2>
-              <p class="card-sub">点击即可一键发送到当前会话，省去重复打字</p>
-            </div>
-          </div>
-
-          <div id="prompts-list" class="prompts-list"></div>
-
-          <div class="prompt-creator">
-            <input id="input-prompt-title" type="text" class="glass-input" placeholder="指令标题（如：只看报错）" maxlength="32" />
-            <textarea id="input-prompt-body" class="glass-textarea" rows="2" placeholder="指令完整内容..."></textarea>
-            <div class="action-footer">
-              <button id="btn-save-prompt" class="ghost-btn" type="button">+ 添加快捷指令</button>
-            </div>
-          </div>
         </div>
       </section>
     </main>

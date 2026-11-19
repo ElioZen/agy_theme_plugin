@@ -22,8 +22,6 @@ struct CompanionConfig: Decodable {
 
 final class BackdropCanvasView: NSView {
     private let imageLayer = CALayer()
-    private let tintLayer = CALayer()
-    private let vignetteLayer = CAGradientLayer()
     private let rimLayer = CALayer()
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
@@ -39,23 +37,11 @@ final class BackdropCanvasView: NSView {
         imageLayer.contentsGravity = .resizeAspectFill
         imageLayer.masksToBounds = true
 
-        tintLayer.backgroundColor = NSColor.clear.cgColor
-
-        vignetteLayer.type = .radial
-        vignetteLayer.startPoint = CGPoint(x: 0.5, y: 0.5)
-        vignetteLayer.endPoint = CGPoint(x: 1.0, y: 1.0)
-        vignetteLayer.colors = [
-            NSColor.clear.cgColor,
-            NSColor.black.withAlphaComponent(0.32).cgColor
-        ]
-
         rimLayer.backgroundColor = NSColor.clear.cgColor
         rimLayer.borderWidth = 1.5
         rimLayer.borderColor = NSColor.clear.cgColor
 
         layer?.addSublayer(imageLayer)
-        layer?.addSublayer(tintLayer)
-        layer?.addSublayer(vignetteLayer)
         layer?.addSublayer(rimLayer)
     }
 
@@ -68,8 +54,6 @@ final class BackdropCanvasView: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         imageLayer.frame = bounds
-        tintLayer.frame = bounds
-        vignetteLayer.frame = bounds
         rimLayer.frame = bounds.insetBy(dx: 0.75, dy: 0.75)
         CATransaction.commit()
     }
@@ -84,17 +68,95 @@ final class BackdropCanvasView: NSView {
         return NSColor(srgbRed: r, green: g, blue: b, alpha: 1.0)
     }
 
-    private func loadRenderedImage(path: String, blur: Double) -> CGImage? {
+    /// Emulates hardware Screen-like blending over dark-mode windows via
+    /// luminance-keyed premultiplied RGBA:
+    ///   Out = k*C + (1 - k*L)*D
+    /// Dark sky pixels get tiny alpha so white/colored text stays 95-100% crisp,
+    /// while Milky Way stardust, moon, and warm train windows glow vividly over
+    /// dark Antigravity backgrounds.
+    private func renderLuminanceScreen(_ cgImage: CGImage, strength: Double, edgeFade: Double) -> CGImage? {
+        let width = cgImage.width
+        let height = cgImage.height
+        guard width > 0, height > 0 else { return cgImage }
+
+        let bytesPerPixel = 4
+        let bytesPerRow = width * bytesPerPixel
+        var buffer = [UInt8](repeating: 0, count: height * bytesPerRow)
+
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let readInfo = CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.noneSkipLast.rawValue
+        guard let readCtx = CGContext(
+            data: &buffer,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: readInfo
+        ) else { return cgImage }
+
+        readCtx.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        let baseK = Float(max(0.08, min(0.92, strength)))
+        let fadeAmt = Float(max(0.0, min(0.80, edgeFade)))
+        let invW = 1.0 / Float(max(1, width - 1))
+        let invH = 1.0 / Float(max(1, height - 1))
+
+        buffer.withUnsafeMutableBufferPointer { ptr in
+            guard let base = ptr.baseAddress else { return }
+            for y in 0..<height {
+                let ny = (Float(y) * invH - 0.5) * 2.0
+                let ny2 = ny * ny
+                let rowOffset = y * bytesPerRow
+                for x in 0..<width {
+                    let nx = (Float(x) * invW - 0.5) * 2.0
+                    let dist2 = min(1.0, (nx * nx * 0.72 + ny2 * 0.55))
+                    let k = baseK * (1.0 - fadeAmt * dist2 * 0.65)
+
+                    let idx = rowOffset + x * 4
+                    let r = Float(base[idx])
+                    let g = Float(base[idx + 1])
+                    let b = Float(base[idx + 2])
+                    let luma = max(r, max(g, b))
+
+                    let a = min(255.0, luma * k)
+                    base[idx] = UInt8(min(a, r * k))
+                    base[idx + 1] = UInt8(min(a, g * k))
+                    base[idx + 2] = UInt8(min(a, b * k))
+                    base[idx + 3] = UInt8(a)
+                }
+            }
+        }
+
+        let outInfo = CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
+        guard let outCtx = CGContext(
+            data: &buffer,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: outInfo
+        ) else { return cgImage }
+
+        return outCtx.makeImage()
+    }
+
+    private func loadRenderedImage(config: CompanionConfig) -> CGImage? {
+        let path = config.imagePath
         guard !path.isEmpty, FileManager.default.fileExists(atPath: path) else {
             cachedImageKey = ""
             cachedCGImage = nil
             return nil
         }
 
-        let blurBucket = Int(round(blur))
+        let blurBucket = Int(round(config.blur))
+        let opacityBucket = Int(round(config.opacity * 100))
+        let vigBucket = Int(round(config.vignette * 100))
+        let style = config.blendStyle
         let attrs = try? FileManager.default.attributesOfItem(atPath: path)
         let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-        let key = "\(path)|\(mtime)|\(blurBucket)"
+        let key = "\(path)|\(mtime)|\(blurBucket)|\(opacityBucket)|\(vigBucket)|\(style)"
         if key == cachedImageKey, let img = cachedCGImage {
             return img
         }
@@ -104,7 +166,7 @@ final class BackdropCanvasView: NSView {
             return nil
         }
 
-        var result: CGImage = cgRaw
+        var working: CGImage = cgRaw
         if blurBucket > 0 {
             let input = CIImage(cgImage: cgRaw)
             let clamped = input.clampedToExtent()
@@ -113,14 +175,20 @@ final class BackdropCanvasView: NSView {
                 filter.setValue(Double(blurBucket) * 1.4, forKey: kCIInputRadiusKey)
                 if let output = filter.outputImage?.cropped(to: input.extent),
                    let blurred = ciContext.createCGImage(output, from: input.extent) {
-                    result = blurred
+                    working = blurred
                 }
             }
         }
 
+        if style != "soft" {
+            if let screened = renderLuminanceScreen(working, strength: config.opacity, edgeFade: config.vignette) {
+                working = screened
+            }
+        }
+
         cachedImageKey = key
-        cachedCGImage = result
-        return result
+        cachedCGImage = working
+        return working
     }
 
     func apply(config: CompanionConfig) {
@@ -132,25 +200,19 @@ final class BackdropCanvasView: NSView {
         rimLayer.cornerRadius = max(0, radius - 0.75)
 
         imageLayer.contentsGravity = (config.fit == "contain") ? .resizeAspect : .resizeAspectFill
-        imageLayer.contents = loadRenderedImage(path: config.imagePath, blur: config.blur)
+        imageLayer.contents = loadRenderedImage(config: config)
 
-        let wpOpacity = Float(max(0.0, min(0.70, config.opacity)))
-        imageLayer.opacity = wpOpacity
-
-        let tint = parseHexColor(config.tintHex)
-        let softTintAlpha: CGFloat = (config.blendStyle == "soft") ? 0.14 : 0.04
-        tintLayer.backgroundColor = tint.withAlphaComponent(softTintAlpha).cgColor
-
-        let vig = CGFloat(max(0, min(0.75, config.vignette))) * CGFloat(max(0.25, wpOpacity))
-        vignetteLayer.colors = [
-            NSColor.clear.cgColor,
-            NSColor.black.withAlphaComponent(vig).cgColor
-        ]
+        // In screen mode opacity is already baked into luminance-keyed premultiplied alpha.
+        if config.blendStyle == "soft" {
+            imageLayer.opacity = Float(max(0.05, min(0.55, config.opacity * 0.55)))
+        } else {
+            imageLayer.opacity = 1.0
+        }
 
         if config.glassRim ?? true {
             let accent = parseHexColor(config.accentHex ?? "#6EA8FF")
             rimLayer.borderWidth = 1.5
-            rimLayer.borderColor = accent.withAlphaComponent(0.55).cgColor
+            rimLayer.borderColor = accent.withAlphaComponent(0.52).cgColor
         } else {
             rimLayer.borderWidth = 0
             rimLayer.borderColor = NSColor.clear.cgColor
