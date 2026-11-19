@@ -232,6 +232,8 @@ struct TrackedWindow {
 }
 
 final class BackdropController: NSObject {
+    private static let activeOverlayLevel = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.normalWindow)) + 1)
+
     private let configPath: String
     private let parentPid: pid_t
     private let window: NSWindow
@@ -243,6 +245,7 @@ final class BackdropController: NSObject {
     private var lastAppliedFrame: NSRect = .zero
     private var lastOrderedRelativeTo: Int = 0
     private var isOrderedIn = false
+    private var isElevated = false
     private var isDimmedHidden = false
     private var lostFocusAt: TimeInterval = 0
 
@@ -272,9 +275,12 @@ final class BackdropController: NSObject {
         window.hidesOnDeactivate = false
         window.isReleasedWhenClosed = false
         window.animationBehavior = .none
-        // Normal window level + order(.above, relativeTo: agyWid) locks the backdrop
-        // directly to Antigravity's layer-0 window so other apps naturally cover it
-        // without tearing down the WindowServer surface (zero flash, zero click needed).
+        // Hybrid 2-level strategy:
+        // - Layer +1 (normal + 1) when Antigravity is topmost: left-clicking anywhere inside
+        //   Antigravity raises Antigravity within Layer 0, NEVER overtaking Layer +1 (zero click flash!),
+        //   while menus/IME/popovers (Layer 3..101) remain completely above.
+        // - Layer 0 glued immediately above Antigravity when another app is in front: other apps
+        //   naturally cover our backdrop without tearing down the WindowServer surface.
         window.level = .normal
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         window.contentView = canvasView
@@ -373,12 +379,14 @@ final class BackdropController: NSObject {
 
         for info in list {
             let wid = (info[kCGWindowNumber as String] as? Int) ?? 0
+            let layer = (info[kCGWindowLayer as String] as? Int) ?? -1
             if wid == myWid {
-                myRank = regularRank
-                regularRank += 1
+                if layer == 0 {
+                    myRank = regularRank
+                    regularRank += 1
+                }
                 continue
             }
-            let layer = (info[kCGWindowLayer as String] as? Int) ?? -1
             if layer != 0 { continue }
 
             let alpha = (info[kCGWindowAlpha as String] as? Double) ?? 1.0
@@ -435,6 +443,7 @@ final class BackdropController: NSObject {
         if isOrderedIn {
             window.orderOut(nil)
             isOrderedIn = false
+            isElevated = false
             lastOrderedRelativeTo = 0
         }
     }
@@ -476,13 +485,11 @@ final class BackdropController: NSObject {
             lastAppliedFrame = tracked.frame
         }
 
-        // Antigravity counts as active if macOS reports it frontmost OR its window is
-        // already the topmost layer-0 window on screen (eliminates needing a click after switch).
-        let isActive = isAntigravityFrontmost() || tracked.isTopmostRegular
+        let agyIsTop = tracked.isTopmostRegular
+        let isActive = isAntigravityFrontmost() || agyIsTop
         let now = Date().timeIntervalSinceReferenceDate
 
         if cfg.onlyWhenFrontmost && !isActive && !tracked.isMostlyOccluded {
-            // Uncovered split-screen background: brief 180ms grace avoids IME/popover flicker
             if lostFocusAt == 0 {
                 lostFocusAt = now
             }
@@ -490,22 +497,39 @@ final class BackdropController: NSObject {
                 setBackdropAlpha(0.0)
             }
         } else {
-            // Either Antigravity is active OR cleanly occluded behind another full-size app:
-            // keep alpha=1.0 & Z-glued directly above Antigravity so returning is 100% instant!
             lostFocusAt = 0
             setBackdropAlpha(1.0)
         }
 
-        let zOrderDrifted: Bool = {
-            guard let myIdx = tracked.myIndex else { return true }
-            // Healthy state: our backdrop sits immediately above Antigravity (myIdx == listIndex - 1)
-            return myIdx != tracked.listIndex - 1
-        }()
-
-        if !isOrderedIn || forceOrder || zOrderDrifted || lastOrderedRelativeTo != tracked.windowNumber {
-            window.order(.above, relativeTo: tracked.windowNumber)
-            isOrderedIn = true
+        if agyIsTop {
+            // Antigravity is the topmost Layer-0 window: promote backdrop to Layer +1 so
+            // left-clicking anywhere inside Antigravity can NEVER raise Antigravity above it!
+            if !isElevated {
+                window.level = Self.activeOverlayLevel
+                isElevated = true
+            }
+            if !isOrderedIn {
+                window.orderFrontRegardless()
+                isOrderedIn = true
+            }
             lastOrderedRelativeTo = tracked.windowNumber
+        } else {
+            // Another normal app window is above Antigravity: drop to Layer 0 glued right above
+            // Antigravity so the frontmost app cleanly covers our backdrop with zero surface teardown.
+            let wasElevated = isElevated
+            if isElevated {
+                window.level = .normal
+                isElevated = false
+            }
+            let zOrderDrifted: Bool = {
+                guard let myIdx = tracked.myIndex else { return true }
+                return myIdx != tracked.listIndex - 1
+            }()
+            if !isOrderedIn || wasElevated || forceOrder || zOrderDrifted || lastOrderedRelativeTo != tracked.windowNumber {
+                window.order(.above, relativeTo: tracked.windowNumber)
+                isOrderedIn = true
+                lastOrderedRelativeTo = tracked.windowNumber
+            }
         }
     }
 }
