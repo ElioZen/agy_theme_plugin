@@ -12,10 +12,12 @@ import {
   PrismStorage,
 } from './storage.mjs';
 import { buildTelemetrySnapshot } from './telemetry.mjs';
+import { ONLINE_SOURCES, OnlineWallpaperGallery } from './wallpaper_gallery.mjs';
 
 const storage = new PrismStorage();
 const companion = new MacBackdropCompanion(storage);
 const quotaFetcher = new AgyQuotaFetcher(storage);
+const onlineGallery = new OnlineWallpaperGallery(storage);
 
 const MIME_BY_EXT = {
   '.html': 'text/html; charset=utf-8',
@@ -47,6 +49,7 @@ function buildStatePayload(settings = storage.loadSettings()) {
       existsSync(join(BUILTIN_WALLPAPERS_DIR, w.file)),
     ),
     customWallpapers: storage.listCustomWallpapers(),
+    onlineSources: ONLINE_SOURCES,
     companion: companion.getState(),
   };
 }
@@ -81,7 +84,7 @@ app.page('/logo.svg', () => {
 app.api(
   '/api/wallpaper',
   (data) => {
-    const kind = data.kind === 'custom' ? 'custom' : 'builtin';
+    const kind = data.kind === 'custom' ? 'custom' : data.kind === 'online' ? 'online' : 'builtin';
     const id = String(data.id || '');
     const filePath = storage.resolveWallpaperPath({ kind, id });
     if (!filePath || !existsSync(filePath)) {
@@ -90,7 +93,7 @@ app.api(
     const mime = MIME_BY_EXT[extname(filePath).toLowerCase()] || 'image/jpeg';
     return new Response(readFileSync(filePath), {
       contentType: mime,
-      headers: { 'Cache-Control': 'public, max-age=86400' },
+      headers: { 'Cache-Control': kind === 'online' ? 'no-store' : 'public, max-age=86400' },
     });
   },
   'GET',
@@ -142,10 +145,45 @@ app.api('/api/presets/delete', (data) => {
 app.api('/api/wallpapers/upload', async (data) => {
   const saved = storage.saveCustomWallpaper(data?.name, data?.dataUrl);
   const updated = storage.saveSettings({
-    wallpaper: { kind: 'custom', id: saved.id },
+    wallpaper: { kind: 'custom', id: saved.id, onlineMeta: null },
   });
   await companion.syncWithSettings(updated);
   return { uploaded: saved, ...buildStatePayload(updated) };
+});
+
+app.api('/api/wallpapers/random-online', async (data) => {
+  const sourceId = String(data?.source || 'all');
+  const fetched = await onlineGallery.fetchRandom(sourceId);
+  const updated = storage.saveSettings({
+    wallpaper: {
+      kind: 'online',
+      id: fetched.id,
+      onlineSource: sourceId,
+      onlineMeta: fetched.meta,
+    },
+  });
+  await companion.syncWithSettings(updated);
+  return { fetched, ...buildStatePayload(updated) };
+});
+
+app.api('/api/wallpapers/collect-online', async () => {
+  const current = storage.loadSettings();
+  if (current.wallpaper?.kind !== 'online' || !current.wallpaper?.id) {
+    throw new Error('当前不是在线随机壁纸');
+  }
+  const collected = storage.collectOnlineWallpaper(
+    current.wallpaper.id,
+    current.wallpaper.onlineMeta?.name || 'online_wallpaper',
+  );
+  const updated = storage.saveSettings({
+    wallpaper: {
+      kind: 'custom',
+      id: collected.id,
+      onlineMeta: null,
+    },
+  });
+  await companion.syncWithSettings(updated);
+  return { collected, ...buildStatePayload(updated) };
 });
 
 app.api('/api/wallpapers/delete', async (data) => {

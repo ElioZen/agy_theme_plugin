@@ -182,6 +182,82 @@ function describeToolAction(toolName) {
   return label ? `${label} (${base})` : `执行 ${base}`;
 }
 
+function unwrapArgScalar(v) {
+  if (v === null || v === undefined) return '';
+  let s = String(v).trim();
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+    try {
+      const parsed = JSON.parse(s);
+      if (typeof parsed === 'string') s = parsed;
+    } catch {
+      s = s.slice(1, -1);
+    }
+  }
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+function shortPathTail(p) {
+  const clean = unwrapArgScalar(p);
+  if (!clean) return '';
+  const parts = clean.split('/').filter(Boolean);
+  return parts.length > 2 ? `.../${parts.slice(-2).join('/')}` : clean;
+}
+
+function truncateLine(str, maxLen = 88) {
+  const clean = String(str || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return '';
+  return clean.length > maxLen ? `${clean.slice(0, maxLen - 1)}…` : clean;
+}
+
+function summarizeToolCallDetail(toolName, rawArgs) {
+  const base = String(toolName || '').replace(/^default_api:/, '');
+  let args = rawArgs;
+  if (typeof args === 'string') {
+    const trimmed = args.trim();
+    if (trimmed.startsWith('{')) {
+      try {
+        args = JSON.parse(trimmed);
+      } catch {
+        // leave as string
+      }
+    }
+  }
+
+  if (typeof args === 'string') {
+    const cmdMatch = /cmd\s*:\s*[`'"]([^`'"]{2,120})[`'"]/.exec(args);
+    if (cmdMatch) return truncateLine(`$ ${cmdMatch[1]}`);
+    const patchMatch = /\*\*\*\s+(?:Update|Add|Delete)\s+File:\s+([^\n]+)/.exec(args);
+    if (patchMatch) return truncateLine(`patch ${shortPathTail(patchMatch[1])}`);
+    return truncateLine(args);
+  }
+
+  if (!args || typeof args !== 'object') return '';
+
+  const cmd = unwrapArgScalar(args.CommandLine || args.cmd || args.command || args.Script || '');
+  if (cmd) return truncateLine(`$ ${cmd}`);
+
+  const filePath = args.Path || args.TargetFile || args.file_path || args.path || args.ScriptPath || '';
+  if (filePath) {
+    const shortP = shortPathTail(filePath);
+    const start = unwrapArgScalar(args.StartLine || '');
+    const end = unwrapArgScalar(args.EndLine || '');
+    const rangeTxt = start ? (end ? `#L${start}-${end}` : `#L${start}`) : '';
+    return truncateLine(`${base}: ${shortP}${rangeTxt}`);
+  }
+
+  const query = unwrapArgScalar(args.query || args.Query || args.Pattern || args.Description || '');
+  if (query) return truncateLine(`${base}: ${query}`);
+
+  const role = unwrapArgScalar(args.Role || args.TypeName || '');
+  if (role) return truncateLine(`${base}: ${role}`);
+
+  for (const [k, v] of Object.entries(args)) {
+    const val = unwrapArgScalar(v);
+    if (val && val.length <= 120) return truncateLine(`${k}=${val}`);
+  }
+  return '';
+}
+
 function parseAgyTranscript(filePath) {
   let stat;
   try {
@@ -210,6 +286,7 @@ function parseAgyTranscript(filePath) {
   let prevStepMs = 0;
   let totalSteps = 0;
   let lastObj = null;
+  let lastToolDetail = '';
 
   for (const line of text.split('\n')) {
     if (!line.trim()) continue;
@@ -235,7 +312,12 @@ function parseAgyTranscript(filePath) {
       const outTok = Number(obj.output_tokens || 0);
       thinkingChars += String(obj.thinking || '').length;
       assistantChars += String(obj.content || '').length;
-      toolChars += Array.isArray(obj.tool_calls) ? JSON.stringify(obj.tool_calls).length : 0;
+      if (Array.isArray(obj.tool_calls) && obj.tool_calls.length > 0) {
+        toolChars += JSON.stringify(obj.tool_calls).length;
+        const lastTc = obj.tool_calls[obj.tool_calls.length - 1];
+        const detail = summarizeToolCallDetail(lastTc?.name || lastTc?.tool_name || '', lastTc?.args || lastTc?.arguments);
+        if (detail) lastToolDetail = detail;
+      }
 
       let tokPerSec = null;
       if (prevStepMs > 0 && ts > prevStepMs && outTok >= 15) {
@@ -335,6 +417,7 @@ function parseAgyTranscript(filePath) {
     mtimeMs: stat.mtimeMs,
     activity,
     activityKind,
+    lastToolDetail,
     isTurnFinished,
     lastStatus: String(lastObj?.status || ''),
     charWeights: {
@@ -455,6 +538,7 @@ function parseCodexSession(filePath, statInfo) {
   let isCompleted = false;
   let activity = '运行中';
   let activityKind = 'thinking';
+  let lastToolDetail = '';
   let turnCount = 0;
   let prevUsage = null;
   const turns = [];
@@ -574,6 +658,8 @@ function parseCodexSession(filePath, statInfo) {
       } else if (p.type === 'custom_tool_call' || p.type === 'function_call') {
         activity = describeToolAction(p.name || 'tool');
         activityKind = 'tool';
+        const detail = summarizeToolCallDetail(p.name || 'tool', p.arguments ?? p.input);
+        if (detail) lastToolDetail = detail;
       } else if (p.type === 'custom_tool_call_output' || p.type === 'function_call_output') {
         activity = '工具返回 · 继续思考';
         activityKind = 'thinking';
@@ -615,6 +701,7 @@ function parseCodexSession(filePath, statInfo) {
     isCompleted,
     activity,
     activityKind,
+    lastToolDetail,
   };
 
   codexCache.set(filePath, { cacheKey, data });
@@ -1035,6 +1122,24 @@ export function buildTelemetrySnapshot({
   const toolTokens = Math.max(0, variableTokens - thinkingTokens - dialogTokens);
   const remainingTokens = Math.max(0, limit - usedTokens);
 
+  const nonCheckpointTurns = activeTurns.filter((t) => !t.isCheckpoint);
+  const latestModelTurn = nonCheckpointTurns.length > 0 ? nonCheckpointTurns[nonCheckpointTurns.length - 1] : null;
+  const lastTurnPrompt = latestModelTurn ? latestModelTurn.uncachedInput + latestModelTurn.cacheRead : 0;
+  const lastTurnCacheHitRate =
+    lastTurnPrompt > 0 ? Math.round((latestModelTurn.cacheRead / lastTurnPrompt) * 1000) / 10 : null;
+  const isCacheDrop = Boolean(
+    latestModelTurn &&
+      nonCheckpointTurns.length >= 2 &&
+      lastTurnPrompt >= 12000 &&
+      (lastTurnCacheHitRate < 35 || (latestModelTurn.uncachedInput >= 50000 && lastTurnCacheHitRate < 65)),
+  );
+  const lastTurnCache = {
+    hitRate: lastTurnCacheHitRate,
+    cacheRead: latestModelTurn?.cacheRead || 0,
+    uncachedInput: latestModelTurn?.uncachedInput || 0,
+    isDrop: isCacheDrop,
+  };
+
   const speedPoints = activeTurns
     .filter((t) => typeof t.tokPerSec === 'number')
     .slice(-14)
@@ -1044,7 +1149,7 @@ export function buildTelemetrySnapshot({
     speedPoints.length > 0
       ? Math.round((speedPoints.reduce((acc, p) => acc + p.rate, 0) / speedPoints.length) * 10) / 10
       : 0;
-  const parsedLastModel = parseModelAndEffort(activeData?.lastModel || latestTurn?.model || '');
+  const parsedLastModel = parseModelAndEffort(activeData?.lastModel || latestModelTurn?.model || latestTurn?.model || '');
 
   // ==================== UNIFIED PROJECT & SESSION STATS ====================
   const cutoffRangeMs = getRangeCutoffMs(range);
@@ -1180,9 +1285,11 @@ export function buildTelemetrySnapshot({
   };
 
   // ==================== ACTIVE CLI & SUBAGENT MONITOR ====================
-  // Show ONLY live/active agents by default (running or touched within 3 min),
+  // Show ONLY live/active/stalled agents by default (running, stalled > 20m, or touched within 3 min),
   // or recent 60 min if user explicitly toggles showRecentAgents.
   const LIVE_WINDOW_MS = 3 * 60 * 1000;
+  const STALL_THRESHOLD_MS = 20 * 60 * 1000;
+  const STALL_MAX_WINDOW_MS = 90 * 60 * 1000;
   const RECENT_WINDOW_MS = 60 * 60 * 1000;
   const liveAgents = [];
   let recentHiddenCount = 0;
@@ -1190,8 +1297,10 @@ export function buildTelemetrySnapshot({
   // A. Codex CLI agents (~/.codex/sessions)
   for (const cs of codexSessions) {
     const age = nowMs - cs.lastActiveMs;
-    const isRunning = !cs.isCompleted && age < 10 * 60 * 1000;
-    const isLive = isRunning || age <= LIVE_WINDOW_MS;
+    const isUnfinished = !cs.isCompleted && age < STALL_MAX_WINDOW_MS;
+    const isStalled = isUnfinished && age >= STALL_THRESHOLD_MS;
+    const isRunning = isUnfinished && !isStalled;
+    const isLive = isRunning || isStalled || age <= LIVE_WINDOW_MS;
     const isRecent = age <= RECENT_WINDOW_MS;
     if (!isLive && !isRecent) continue;
     if (!isLive && !showRecentAgents) {
@@ -1209,9 +1318,12 @@ export function buildTelemetrySnapshot({
       projectId: cs.projectId,
       projectName: cs.projectName,
       isRunning,
-      statusLabel: isRunning ? '运行中' : '刚完成',
-      activity: isRunning ? cs.activity : '本轮已完成',
-      activityKind: isRunning ? cs.activityKind : 'idle',
+      isStalled,
+      stalledMinutes: isStalled ? Math.floor(age / 60000) : 0,
+      statusLabel: isStalled ? '疑似卡住' : isRunning ? '运行中' : '刚完成',
+      activity: isStalled ? `疑似卡住 · ${cs.activity}` : isRunning ? cs.activity : '本轮已完成',
+      activityKind: isStalled ? 'stalled' : isRunning ? cs.activityKind : 'idle',
+      actionDetail: isRunning || isStalled ? cs.lastToolDetail || '' : '',
       model: baseModel,
       effort,
       totalTokens: cs.totalTokens,
@@ -1228,10 +1340,12 @@ export function buildTelemetrySnapshot({
     if (!proj) continue;
     const lastActiveMs = Math.max(s?.lastModifiedMs || 0, parsed.lastStepAt || 0, parsed.mtimeMs || 0);
     const age = nowMs - lastActiveMs;
-    const isRunning =
-      Boolean(s?.isRunning) ||
-      (!parsed.isTurnFinished && age < 15 * 60 * 1000);
-    const isLive = isRunning || age <= LIVE_WINDOW_MS;
+    const isUnfinished =
+      (Boolean(s?.isRunning) && !s?.killed) ||
+      (!parsed.isTurnFinished && !s?.killed && age < STALL_MAX_WINDOW_MS);
+    const isStalled = isUnfinished && age >= STALL_THRESHOLD_MS;
+    const isRunning = isUnfinished && !isStalled;
+    const isLive = isRunning || isStalled || age <= LIVE_WINDOW_MS;
     const isRecent = age <= RECENT_WINDOW_MS;
     if (!isLive && !isRecent) continue;
     if (!isLive && !showRecentAgents) {
@@ -1249,9 +1363,12 @@ export function buildTelemetrySnapshot({
       projectId: proj.id,
       projectName: proj.name,
       isRunning,
-      statusLabel: isRunning ? '运行中' : '刚完成',
-      activity: isRunning ? parsed.activity : '本轮已完成',
-      activityKind: isRunning ? parsed.activityKind : 'idle',
+      isStalled,
+      stalledMinutes: isStalled ? Math.floor(age / 60000) : 0,
+      statusLabel: isStalled ? '疑似卡住' : isRunning ? '运行中' : '刚完成',
+      activity: isStalled ? `疑似卡住 · ${parsed.activity}` : isRunning ? parsed.activity : '本轮已完成',
+      activityKind: isStalled ? 'stalled' : isRunning ? parsed.activityKind : 'idle',
+      actionDetail: isRunning || isStalled ? parsed.lastToolDetail || '' : '',
       model: baseModel,
       effort,
       totalTokens: totals.totalTokens,
@@ -1261,7 +1378,7 @@ export function buildTelemetrySnapshot({
     });
   }
 
-  // C. Active Native GUI Subagents (ONLY running or touched recently — zero dead history!)
+  // C. Active Native GUI Subagents (ONLY running, stalled > 20m, or touched recently)
   const nativeSubIds = new Set([...parentOfChild.keys(), ...subDescriptors.keys()]);
   for (const cid of nativeSubIds) {
     const s = summaryById.get(cid);
@@ -1273,10 +1390,12 @@ export function buildTelemetrySnapshot({
 
     const lastActiveMs = Math.max(s?.lastModifiedMs || 0, parsed?.lastStepAt || 0, parsed?.mtimeMs || 0);
     const age = nowMs - lastActiveMs;
-    const isRunning =
+    const isUnfinished =
       (Boolean(s?.isRunning) && !s?.killed) ||
-      (Boolean(parsed && !parsed.isTurnFinished) && !s?.killed && age < 15 * 60 * 1000);
-    const isLive = isRunning || age <= LIVE_WINDOW_MS;
+      (Boolean(parsed && !parsed.isTurnFinished) && !s?.killed && age < STALL_MAX_WINDOW_MS);
+    const isStalled = isUnfinished && age >= STALL_THRESHOLD_MS;
+    const isRunning = isUnfinished && !isStalled;
+    const isLive = isRunning || isStalled || age <= LIVE_WINDOW_MS;
     const isRecent = age <= RECENT_WINDOW_MS;
     if (!isLive && !isRecent) continue;
     if (!isLive && !showRecentAgents) {
@@ -1295,9 +1414,16 @@ export function buildTelemetrySnapshot({
       projectId: proj.id,
       projectName: proj.name,
       isRunning,
-      statusLabel: isRunning ? '运行中' : '刚完成',
-      activity: isRunning ? parsed?.activity || '执行中' : '已完成',
-      activityKind: isRunning ? parsed?.activityKind || 'thinking' : 'idle',
+      isStalled,
+      stalledMinutes: isStalled ? Math.floor(age / 60000) : 0,
+      statusLabel: isStalled ? '疑似卡住' : isRunning ? '运行中' : '刚完成',
+      activity: isStalled
+        ? `疑似卡住 · ${parsed?.activity || '执行中'}`
+        : isRunning
+        ? parsed?.activity || '执行中'
+        : '已完成',
+      activityKind: isStalled ? 'stalled' : isRunning ? parsed?.activityKind || 'thinking' : 'idle',
+      actionDetail: isRunning || isStalled ? parsed?.lastToolDetail || '' : '',
       model: baseModel,
       effort,
       totalTokens: totals.totalTokens,
@@ -1308,7 +1434,8 @@ export function buildTelemetrySnapshot({
   }
 
   liveAgents.sort((a, b) => {
-    if (a.isRunning !== b.isRunning) return a.isRunning ? -1 : 1;
+    const rank = (x) => (x.isRunning ? 0 : x.isStalled ? 1 : 2);
+    if (rank(a) !== rank(b)) return rank(a) - rank(b);
     return b.lastActiveMs - a.lastActiveMs;
   });
 
@@ -1338,6 +1465,7 @@ export function buildTelemetrySnapshot({
       limit,
       percent: usedPercent,
       remaining: remainingTokens,
+      lastTurnCache,
       breakdown: {
         system: systemBase,
         thinking: thinkingTokens,
@@ -1351,13 +1479,14 @@ export function buildTelemetrySnapshot({
         sparkline: speedPoints,
         model: parsedLastModel.baseModel,
         effort: parsedLastModel.effort,
-        rawModel: activeData?.lastModel || latestTurn?.model || '',
-        turnCount: activeTurns.filter((t) => !t.isCheckpoint).length,
+        rawModel: activeData?.lastModel || latestModelTurn?.model || latestTurn?.model || '',
+        turnCount: nonCheckpointTurns.length,
       },
     },
     activeAgents: {
       items: liveAgents.slice(0, 12),
       runningCount: liveAgents.filter((a) => a.isRunning).length,
+      stalledCount: liveAgents.filter((a) => a.isStalled).length,
       recentHiddenCount,
       showRecent: Boolean(showRecentAgents),
     },

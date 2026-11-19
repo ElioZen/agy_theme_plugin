@@ -137,9 +137,12 @@
             </div>
 
             <div class="context-breakdown">
-              <div class="token-headline tabular">
-                <strong id="ctx-used">0</strong>
-                <span class="muted"> / <span id="ctx-limit">512,000</span></span>
+              <div class="token-headline-row">
+                <div class="token-headline tabular">
+                  <strong id="ctx-used">0</strong>
+                  <span class="muted"> / <span id="ctx-limit">512,000</span></span>
+                </div>
+                <span id="ctx-turn-cache-pill" class="badge-pill" hidden></span>
               </div>
               <div class="breakdown-list" id="breakdown-list"></div>
             </div>
@@ -244,11 +247,17 @@
               <span id="active-wallpaper-name" class="badge-pill">星海夜行电车</span>
             </div>
             <div class="header-actions">
-              <button id="btn-random-wp" class="ghost-btn" type="button">随机</button>
+              <button id="btn-random-wp" class="ghost-btn" type="button">本地随机</button>
               <button id="btn-upload-wp" class="ghost-btn" type="button">上传</button>
               <button id="btn-clear-wp" class="ghost-btn" type="button">清除</button>
               <input id="file-wallpaper" type="file" accept="image/png,image/jpeg,image/webp" hidden />
             </div>
+          </div>
+
+          <div class="online-wp-bar">
+            <select id="select-online-source" class="glass-select online-source-select" aria-label="开源图库来源"></select>
+            <button id="btn-random-online" class="primary-btn compact-btn" type="button">随机图库</button>
+            <button id="btn-collect-online" class="ghost-btn compact-btn" type="button" hidden>收藏</button>
           </div>
 
           <div id="wallpaper-grid" class="wallpaper-grid"></div>
@@ -297,6 +306,11 @@
           <div class="card-header wrap-header">
             <h2 class="card-title">液态玻璃色调</h2>
             <div class="header-actions">
+              <button id="btn-adaptive-theme" class="toggle-chip" type="button">
+                <span class="status-dot"></span>
+                <span>壁纸自动取色</span>
+              </button>
+              <button id="btn-extract-colors" class="ghost-btn" type="button">立即取色</button>
               <button id="btn-follow-host" class="toggle-chip" type="button">
                 <span class="status-dot"></span>
                 <span>跟随宿主明暗</span>

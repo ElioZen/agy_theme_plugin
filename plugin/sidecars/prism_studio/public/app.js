@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_VERSION = '3.4.0';
+  const FRONTEND_VERSION = '3.5.0';
   const COLOR_CHANNELS = [
     { key: 'accent', label: '主强调色' },
     { key: 'secondary', label: '次折射色' },
@@ -65,6 +65,192 @@
     if (days > 0) return `${days}天 ${hours}小时后重置`;
     if (hours > 0) return `${hours}小时 ${mins}分后重置`;
     return `${Math.max(1, mins)}分钟后重置`;
+  }
+
+  function formatDurationShort(ms) {
+    if (!ms || ms <= 0) return '即将';
+    const mins = Math.round(ms / 60000);
+    if (mins < 60) return `${Math.max(1, mins)}m`;
+    const hours = ms / 3600000;
+    if (hours < 24) return `${hours.toFixed(1)}h`;
+    return `${(hours / 24).toFixed(1)}d`;
+  }
+
+  // ==================== WALLPAPER ADAPTIVE PALETTE EXTRACTOR ====================
+  function rgbToHsl(r, g, b) {
+    const rn = r / 255;
+    const gn = g / 255;
+    const bn = b / 255;
+    const max = Math.max(rn, gn, bn);
+    const min = Math.min(rn, gn, bn);
+    const l = (max + min) / 2;
+    let h = 0;
+    let s = 0;
+    if (max !== min) {
+      const d = max - min;
+      s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+      if (max === rn) h = ((gn - bn) / d + (gn < bn ? 6 : 0)) / 6;
+      else if (max === gn) h = ((bn - rn) / d + 2) / 6;
+      else h = ((rn - gn) / d + 4) / 6;
+    }
+    return [h * 360, s, l];
+  }
+
+  function hslToHex(h, s, l) {
+    const hn = (((h % 360) + 360) % 360) / 360;
+    const sn = Math.max(0, Math.min(1, s));
+    const ln = Math.max(0, Math.min(1, l));
+    const q = ln < 0.5 ? ln * (1 + sn) : ln + sn - ln * sn;
+    const p = 2 * ln - q;
+    const hue2rgb = (t) => {
+      let tn = t;
+      if (tn < 0) tn += 1;
+      if (tn > 1) tn -= 1;
+      if (tn < 1 / 6) return p + (q - p) * 6 * tn;
+      if (tn < 1 / 2) return q;
+      if (tn < 2 / 3) return p + (q - p) * (2 / 3 - tn) * 6;
+      return p;
+    };
+    const r = Math.round(hue2rgb(hn + 1 / 3) * 255);
+    const g = Math.round(hue2rgb(hn) * 255);
+    const b = Math.round(hue2rgb(hn - 1 / 3) * 255);
+    return (
+      '#' +
+      [r, g, b]
+        .map((x) => Math.max(0, Math.min(255, x)).toString(16).padStart(2, '0'))
+        .join('')
+        .toUpperCase()
+    );
+  }
+
+  function hueDistance(a, b) {
+    const d = Math.abs(a - b) % 360;
+    return d > 180 ? 360 - d : d;
+  }
+
+  function extractPaletteFromUrl(url, lightMode = false) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        try {
+          const w = 72;
+          const h = 40;
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d', { willReadFrequently: true });
+          ctx.drawImage(img, 0, 0, w, h);
+          const { data } = ctx.getImageData(0, 0, w, h);
+
+          // 18 hue bins (20 deg each) weighted by colorfulness and mid-tone luminance
+          const bins = Array.from({ length: 18 }, (_, i) => ({
+            idx: i,
+            weight: 0,
+            sumH: 0,
+            sumS: 0,
+            sumL: 0,
+          }));
+          let avgH = 220;
+          let maxW = 0;
+
+          for (let i = 0; i < data.length; i += 4) {
+            const [hu, sat, lum] = rgbToHsl(data[i], data[i + 1], data[i + 2]);
+            if (lum < 0.10 || lum > 0.90 || sat < 0.14) continue;
+            const lumWeight = 1 - Math.abs(lum - 0.52) * 1.45;
+            const weight = Math.max(0.05, sat * sat * Math.max(0.15, lumWeight));
+            const bi = Math.floor((hu % 360) / 20) % 18;
+            const bin = bins[bi];
+            bin.weight += weight;
+            bin.sumH += hu * weight;
+            bin.sumS += sat * weight;
+            bin.sumL += lum * weight;
+            if (bin.weight > maxW) {
+              maxW = bin.weight;
+              avgH = bin.sumH / bin.weight;
+            }
+          }
+
+          const ranked = bins
+            .filter((b) => b.weight > 0.2)
+            .map((b) => ({
+              h: b.sumH / b.weight,
+              s: b.sumS / b.weight,
+              l: b.sumL / b.weight,
+              weight: b.weight,
+            }))
+            .sort((a, b) => b.weight - a.weight);
+
+          const primary = ranked[0] || { h: 216, s: 0.78, l: 0.65 };
+          const secondary =
+            ranked.find((c) => hueDistance(c.h, primary.h) >= 48) || {
+              h: (primary.h + 150) % 360,
+              s: 0.72,
+              l: 0.68,
+            };
+          const tertiary =
+            ranked.find(
+              (c) => hueDistance(c.h, primary.h) >= 48 && hueDistance(c.h, secondary.h) >= 44,
+            ) || {
+              h: (primary.h + 240) % 360,
+              s: 0.68,
+              l: 0.62,
+            };
+
+          const accentS = Math.max(0.58, Math.min(0.88, primary.s * 1.15));
+          const secS = Math.max(0.54, Math.min(0.86, secondary.s * 1.1));
+          const terS = Math.max(0.50, Math.min(0.82, tertiary.s * 1.05));
+
+          if (lightMode) {
+            resolve({
+              accent: hslToHex(primary.h, accentS, 0.48),
+              secondary: hslToHex(secondary.h, secS, 0.46),
+              tertiary: hslToHex(tertiary.h, terS, 0.40),
+              canvas: hslToHex(avgH, 0.24, 0.94),
+              surface: hslToHex(avgH, 0.22, 0.97),
+              card: '#FFFFFF',
+            });
+          } else {
+            resolve({
+              accent: hslToHex(primary.h, accentS, 0.70),
+              secondary: hslToHex(secondary.h, secS, 0.69),
+              tertiary: hslToHex(tertiary.h, terS, 0.60),
+              canvas: hslToHex(avgH, 0.28, 0.08),
+              surface: hslToHex(avgH, 0.28, 0.12),
+              card: hslToHex(avgH, 0.28, 0.16),
+            });
+          }
+        } catch (err) {
+          reject(err);
+        }
+      };
+      img.onerror = () => reject(new Error('壁纸图片加载失败'));
+      img.src = url;
+    });
+  }
+
+  let lastAdaptiveKey = '';
+
+  async function applyAdaptiveColorsFromCurrentWallpaper(force = false) {
+    const wp = appState?.settings?.wallpaper;
+    if (!wp || wp.kind === 'none' || !wp.id) {
+      if (force) showToast('当前未启用壁纸');
+      return;
+    }
+    const key = `${wp.kind}:${wp.id}`;
+    if (!force && key === lastAdaptiveKey) return;
+    lastAdaptiveKey = key;
+    const url = `/api/wallpaper?kind=${encodeURIComponent(wp.kind)}&id=${encodeURIComponent(wp.id)}`;
+    const lightMode = appState.settings.followHostTheme
+      ? hostIsLight
+      : isLightColor(appState.settings.colors?.canvas);
+    try {
+      const palette = await extractPaletteFromUrl(url, lightMode);
+      await queueSaveSettings({ presetId: 'adaptive', colors: palette }, true);
+      if (force) showToast('已从当前壁纸提取主题色 ✨');
+    } catch (err) {
+      if (force) showToast(`取色失败：${err.message}`);
+    }
   }
 
   function formatRelativeTime(ms) {
@@ -217,10 +403,26 @@
   // ==================== RENDER: STUDIO ====================
   function renderStudio() {
     if (!appState) return;
-    const { settings, builtinPresets, builtinWallpapers, customWallpapers, companion } = appState;
+    const { settings, builtinPresets, builtinWallpapers, customWallpapers, onlineSources, companion } = appState;
     applyThemeToDOM(settings);
 
     $('#btn-follow-host').classList.toggle('active', Boolean(settings.followHostTheme));
+    $('#btn-adaptive-theme').classList.toggle('active', Boolean(settings.adaptiveTheme));
+
+    const srcSelect = $('#select-online-source');
+    const sources = Array.isArray(onlineSources) && onlineSources.length
+      ? onlineSources
+      : [{ id: 'all', label: '全部图库' }];
+    const activeOnlineSource = settings.wallpaper?.onlineSource || 'all';
+    srcSelect.innerHTML = sources
+      .map(
+        (s) =>
+          `<option value="${escapeHtml(s.id)}" ${s.id === activeOnlineSource ? 'selected' : ''}>${escapeHtml(s.label)}</option>`,
+      )
+      .join('');
+
+    const collectBtn = $('#btn-collect-online');
+    collectBtn.hidden = settings.wallpaper?.kind !== 'online';
 
     const allPresets = [...builtinPresets, ...(settings.customPresets || [])];
     $('#preset-pills').innerHTML = allPresets
@@ -259,7 +461,13 @@
       ...(customWallpapers || []).map((w) => ({ ...w, kind: 'custom', tag: '本地' })),
     ];
     const currentWp = allWallpapers.find((w) => w.kind === wp.kind && w.id === wp.id);
-    $('#active-wallpaper-name').textContent = wp.kind === 'none' ? '已关闭壁纸' : currentWp?.name || '自定义壁纸';
+    const activeWpLabel =
+      wp.kind === 'none'
+        ? '已关闭壁纸'
+        : wp.kind === 'online'
+        ? `${wp.onlineMeta?.name || '在线壁纸'}${wp.onlineMeta?.sourceLabel ? ` · ${wp.onlineMeta.sourceLabel}` : ''}`
+        : currentWp?.name || '自定义壁纸';
+    $('#active-wallpaper-name').textContent = activeWpLabel;
 
     $('#wallpaper-grid').innerHTML = allWallpapers
       .map((w) => {
@@ -553,46 +761,80 @@
       `;
     };
 
-    const renderQuotaBox = (group) => {
-      const renderItem = (title, bucket) => {
-        const hasVal = Boolean(bucket && typeof bucket.remainingPct === 'number');
-        const leftPct = hasVal ? bucket.remainingPct : null;
-        const usedPct = hasVal ? bucket.usedPct : null;
-        const leftText = leftPct !== null ? `${Number.isInteger(leftPct) ? leftPct : leftPct.toFixed(1)}% 剩余` : '—';
-        const usedText = usedPct !== null ? `已用 ${Number.isInteger(usedPct) ? usedPct : usedPct.toFixed(1)}%` : '总 100%';
-        const resetLine = !hasVal
-          ? (oq.syncing ? '同步中...' : '点击刷新')
-          : leftPct >= 99.95
-          ? '已满额'
-          : bucket.resetAtMs
-          ? formatCountdown(bucket.resetInMs)
-          : '—';
-        return `
-          <div class="quota-item">
-            <div class="quota-left">
-              <span class="quota-name">${title}</span>
-              <span class="quota-reset tabular">${resetLine}</span>
-            </div>
-            <div class="quota-right">
-              <div class="quota-pct-col tabular">
-                <span class="quota-pct-main">${leftText}</span>
-                <span class="quota-pct-used">${usedText}</span>
-              </div>
-              ${renderQuotaRing(leftPct)}
-            </div>
-          </div>
-        `;
-      };
+    const renderQuotaItem = (title, bucket) => {
+      const hasVal = Boolean(bucket && typeof bucket.remainingPct === 'number');
+      const leftPct = hasVal ? bucket.remainingPct : null;
+      const usedPct = hasVal ? bucket.usedPct : null;
+      const leftText = leftPct !== null ? `${Number.isInteger(leftPct) ? leftPct : leftPct.toFixed(1)}% 剩余` : '—';
+      const usedText = usedPct !== null ? `已用 ${Number.isInteger(usedPct) ? usedPct : usedPct.toFixed(1)}%` : '总 100%';
+      const resetLine = !hasVal
+        ? (oq.syncing ? '同步中...' : '点击刷新')
+        : leftPct >= 99.95
+        ? '已满额'
+        : bucket.resetAtMs
+        ? formatCountdown(bucket.resetInMs)
+        : '—';
+      const burnLine =
+        hasVal && bucket.burnPctPerHour >= 0.2
+          ? bucket.willExhaustBeforeReset
+            ? `-${bucket.burnPctPerHour.toFixed(1)}%/h · 预计 ${formatDurationShort(bucket.etaMs)} 耗尽`
+            : `-${bucket.burnPctPerHour.toFixed(1)}%/h`
+          : '';
+      const alertCls =
+        hasVal && bucket.alertLevel === 'critical'
+          ? 'alert-critical'
+          : hasVal && bucket.alertLevel === 'warn'
+          ? 'alert-warn'
+          : '';
       return `
-        <div class="quota-box">
-          <div class="quota-head">${group?.label || ''}</div>
-          ${renderItem('每周限额', group?.weekly)}
-          ${renderItem('5小时限额', group?.h5)}
+        <div class="quota-item ${alertCls}">
+          <div class="quota-left">
+            <span class="quota-name">${title}</span>
+            <span class="quota-reset tabular">${resetLine}</span>
+            ${burnLine ? `<span class="quota-burn tabular ${bucket.willExhaustBeforeReset ? 'urgent' : ''}">${burnLine}</span>` : ''}
+          </div>
+          <div class="quota-right">
+            <div class="quota-pct-col tabular">
+              <span class="quota-pct-main">${leftText}</span>
+              <span class="quota-pct-used">${usedText}</span>
+            </div>
+            ${renderQuotaRing(leftPct)}
+          </div>
         </div>
       `;
     };
 
-    $('#quota-grid').innerHTML = renderQuotaBox(oq.gemini) + renderQuotaBox(oq.claude);
+    const renderQuotaBox = (group, { wide = false } = {}) => {
+      if (wide) {
+        const itemsHtml = [
+          group?.weekly ? renderQuotaItem('每周限额', group.weekly) : '',
+          group?.h5 ? renderQuotaItem('5小时限额', group.h5) : '',
+        ]
+          .filter(Boolean)
+          .join('');
+        if (!itemsHtml) return '';
+        const metaTxt = group?.fetchedAtMs ? formatRelativeTime(group.fetchedAtMs) : '';
+        return `
+          <div class="quota-box quota-box-wide">
+            <div class="quota-head">
+              <span>${escapeHtml(group?.label || '')}</span>
+              ${metaTxt ? `<span class="quota-head-meta">${metaTxt}</span>` : ''}
+            </div>
+            <div class="quota-box-wide-items">${itemsHtml}</div>
+          </div>
+        `;
+      }
+      return `
+        <div class="quota-box">
+          <div class="quota-head"><span>${escapeHtml(group?.label || '')}</span></div>
+          ${renderQuotaItem('每周限额', group?.weekly)}
+          ${renderQuotaItem('5小时限额', group?.h5)}
+        </div>
+      `;
+    };
+
+    const codexBoxHtml = oq.codex?.available ? renderQuotaBox(oq.codex, { wide: true }) : '';
+    $('#quota-grid').innerHTML = renderQuotaBox(oq.gemini) + renderQuotaBox(oq.claude) + codexBoxHtml;
 
     // ========== WINDOW 3: STANDALONE REAL-TIME CONTEXT ==========
     const ctx = telemetry.context;
@@ -602,6 +844,21 @@
     $('#ring-percent').textContent = `${ctx.percent.toFixed(ctx.percent >= 10 ? 0 : 1)}%`;
     $('#ctx-used').textContent = formatNumber(ctx.used);
     $('#ctx-limit').textContent = formatNumber(ctx.limit);
+
+    const turnCachePill = $('#ctx-turn-cache-pill');
+    const ltc = ctx.lastTurnCache;
+    if (ltc && typeof ltc.hitRate === 'number') {
+      turnCachePill.hidden = false;
+      if (ltc.isDrop) {
+        turnCachePill.textContent = `⚠ 掉缓存 ${ltc.hitRate.toFixed(0)}% (+${formatCompact(ltc.uncachedInput)})`;
+        turnCachePill.className = 'badge-pill danger';
+      } else {
+        turnCachePill.textContent = `本轮缓存 ${ltc.hitRate.toFixed(1)}%`;
+        turnCachePill.className = 'badge-pill running';
+      }
+    } else {
+      turnCachePill.hidden = true;
+    }
 
     document.querySelectorAll('#window-limit-group .seg-btn').forEach((b) => {
       b.classList.toggle('active', Number(b.dataset.limit) === Number(ctx.limit));
@@ -638,8 +895,20 @@
     // ========== WINDOW 4: ACTIVE CLI & SUBAGENT LIVE MONITOR ==========
     const ag = telemetry.activeAgents;
     const badge = $('#active-agents-badge');
-    badge.textContent = ag.runningCount > 0 ? `${ag.runningCount} 运行中` : `${ag.items.length} 活动中`;
-    badge.className = `badge-pill ${ag.runningCount > 0 ? 'running' : ''}`;
+    const stalledCount = Number(ag.stalledCount || 0);
+    if (stalledCount > 0 && ag.runningCount > 0) {
+      badge.textContent = `${ag.runningCount} 运行中 · ${stalledCount} 疑似卡住`;
+      badge.className = 'badge-pill warn';
+    } else if (stalledCount > 0) {
+      badge.textContent = `${stalledCount} 疑似卡住`;
+      badge.className = 'badge-pill warn';
+    } else if (ag.runningCount > 0) {
+      badge.textContent = `${ag.runningCount} 运行中`;
+      badge.className = 'badge-pill running';
+    } else {
+      badge.textContent = `${ag.items.length} 活动中`;
+      badge.className = 'badge-pill';
+    }
 
     const recentBtn = $('#btn-toggle-recent-agents');
     recentBtn.textContent = ag.showRecent ? '仅看活动中' : `近期 1h (${ag.recentHiddenCount})`;
@@ -659,15 +928,23 @@
           .map((a) => {
             const isCodex = a.kind === 'codex-cli';
             const clickAttr = a.clickableConvId ? `data-jump-agent="${escapeHtml(a.clickableConvId)}"` : '';
+            const stateCls = a.isStalled ? 'is-stalled' : a.isRunning ? 'is-running' : '';
+            const pillCls = a.isStalled ? 'warn' : a.isRunning ? 'running' : '';
+            const statusSuffix = a.isStalled
+              ? `疑似卡住 ${a.stalledMinutes}m`
+              : a.isRunning
+              ? '运行中'
+              : formatRelativeTime(a.lastActiveMs);
             return `
-              <div class="agent-card ${a.isRunning ? 'is-running' : ''} ${a.clickableConvId ? 'clickable' : ''}" ${clickAttr}>
+              <div class="agent-card ${stateCls} ${a.clickableConvId ? 'clickable' : ''}" ${clickAttr}>
                 <div class="agent-top">
                   <div class="agent-id-group">
                     <span class="source-tag ${isCodex ? 'codex' : ''}">${escapeHtml(a.kindLabel)}</span>
                     <span class="agent-action">${escapeHtml(a.activity)}</span>
                   </div>
-                  <span class="badge-pill ${a.isRunning ? 'running' : ''}">${escapeHtml(a.projectName)} · ${a.isRunning ? '运行中' : formatRelativeTime(a.lastActiveMs)}</span>
+                  <span class="badge-pill ${pillCls}">${escapeHtml(a.projectName)} · ${statusSuffix}</span>
                 </div>
+                ${a.actionDetail ? `<div class="agent-cmd-line" title="${escapeHtml(a.actionDetail)}">${escapeHtml(a.actionDetail)}</div>` : ''}
                 <div class="agent-metrics-grid tabular">
                   <div class="agent-kv">
                     <span>当前模型</span>
@@ -888,6 +1165,18 @@
 
     // Studio bindings
     $('#btn-toggle-companion').addEventListener('click', toggleCompanion);
+    $('#btn-adaptive-theme').addEventListener('click', async () => {
+      const next = !Boolean(appState.settings.adaptiveTheme);
+      await queueSaveSettings({ adaptiveTheme: next }, true);
+      if (next) {
+        await applyAdaptiveColorsFromCurrentWallpaper(true);
+      } else {
+        showToast('已关闭壁纸自动取色');
+      }
+    });
+    $('#btn-extract-colors').addEventListener('click', () => {
+      applyAdaptiveColorsFromCurrentWallpaper(true);
+    });
     $('#btn-follow-host').addEventListener('click', () => {
       queueSaveSettings({ followHostTheme: !appState.settings.followHostTheme }, true);
     });
@@ -895,6 +1184,7 @@
       const res = await apiFetch('/api/reset-colors', { method: 'POST', body: '{}' });
       if (res.ok) {
         appState = await res.json();
+        await queueSaveSettings({ adaptiveTheme: false }, true);
         renderStudio();
         showToast('已还原星海暖灯默认配色');
       }
@@ -920,7 +1210,7 @@
       const all = [...appState.builtinPresets, ...(appState.settings.customPresets || [])];
       const found = all.find((p) => p.id === pill.dataset.presetId);
       if (!found) return;
-      queueSaveSettings({ presetId: found.id, followHostTheme: false, colors: { ...found.colors } }, true);
+      queueSaveSettings({ presetId: found.id, followHostTheme: false, adaptiveTheme: false, colors: { ...found.colors } }, true);
       showToast(`已切换「${found.name}」`);
     });
 
@@ -949,7 +1239,7 @@
       const key = input.dataset.colorKey;
       const hex = input.value.toUpperCase();
       input.closest('.color-cell').querySelector('.color-cell-hex').textContent = hex;
-      queueSaveSettings({ presetId: 'custom', colors: { [key]: hex } }, false);
+      queueSaveSettings({ presetId: 'custom', adaptiveTheme: false, colors: { [key]: hex } }, false);
     });
 
     $('#wallpaper-grid').addEventListener('click', async (e) => {
@@ -969,10 +1259,62 @@
       }
       const card = e.target.closest('.wp-card');
       if (!card) return;
-      queueSaveSettings({ wallpaper: { kind: card.dataset.wpKind, id: card.dataset.wpId } }, true);
+      await queueSaveSettings({ wallpaper: { kind: card.dataset.wpKind, id: card.dataset.wpId, onlineMeta: null } }, true);
+      if (appState?.settings?.adaptiveTheme) {
+        await applyAdaptiveColorsFromCurrentWallpaper(false);
+      }
     });
 
-    $('#btn-random-wp').addEventListener('click', () => {
+    $('#select-online-source').addEventListener('change', (e) => {
+      queueSaveSettings({ wallpaper: { onlineSource: e.target.value } }, true);
+    });
+
+    $('#btn-random-online').addEventListener('click', async () => {
+      const btn = $('#btn-random-online');
+      const source = $('#select-online-source').value || 'all';
+      btn.disabled = true;
+      btn.textContent = '拉取中...';
+      try {
+        const res = await apiFetch('/api/wallpapers/random-online', {
+          method: 'POST',
+          body: JSON.stringify({ source }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error || `HTTP ${res.status}`);
+        }
+        const payload = await res.json();
+        appState = payload;
+        renderStudio();
+        if (appState?.settings?.adaptiveTheme) {
+          await applyAdaptiveColorsFromCurrentWallpaper(false);
+        }
+        const meta = payload.fetched?.meta;
+        showToast(`已切换「${meta?.name || '在线壁纸'}」(${meta?.sourceLabel || '开源图库'})`);
+      } catch (err) {
+        showToast(err.message || '开源图库拉取失败');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '随机图库';
+      }
+    });
+
+    $('#btn-collect-online').addEventListener('click', async () => {
+      try {
+        const res = await apiFetch('/api/wallpapers/collect-online', { method: 'POST', body: '{}' });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error || '收藏失败');
+        }
+        appState = await res.json();
+        renderStudio();
+        showToast('已收藏到本地画廊 ✨');
+      } catch (err) {
+        showToast(err.message);
+      }
+    });
+
+    $('#btn-random-wp').addEventListener('click', async () => {
       const all = [
         ...appState.builtinWallpapers.map((w) => ({ kind: 'builtin', id: w.id, name: w.name })),
         ...(appState.customWallpapers || []).map((w) => ({ kind: 'custom', id: w.id, name: w.name })),
@@ -981,12 +1323,15 @@
       const cur = appState.settings.wallpaper;
       const pool = all.filter((w) => !(w.kind === cur.kind && w.id === cur.id));
       const pick = (pool.length ? pool : all)[Math.floor(Math.random() * (pool.length ? pool.length : all.length))];
-      queueSaveSettings({ wallpaper: { kind: pick.kind, id: pick.id } }, true);
+      await queueSaveSettings({ wallpaper: { kind: pick.kind, id: pick.id, onlineMeta: null } }, true);
+      if (appState?.settings?.adaptiveTheme) {
+        await applyAdaptiveColorsFromCurrentWallpaper(false);
+      }
       showToast(`已切换壁纸「${pick.name}」`);
     });
 
     $('#btn-clear-wp').addEventListener('click', () => {
-      queueSaveSettings({ wallpaper: { kind: 'none', id: '' } }, true);
+      queueSaveSettings({ wallpaper: { kind: 'none', id: '', onlineMeta: null } }, true);
       showToast('已清除壁纸');
     });
 
@@ -1008,6 +1353,9 @@
           }
           appState = await res.json();
           renderStudio();
+          if (appState?.settings?.adaptiveTheme) {
+            await applyAdaptiveColorsFromCurrentWallpaper(false);
+          }
           showToast('自定义壁纸已应用');
         } catch (err) {
           showToast(err.message);

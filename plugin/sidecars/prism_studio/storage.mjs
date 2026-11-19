@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -125,17 +125,20 @@ export const BUILTIN_WALLPAPERS = [
 ];
 
 const SCHEMA_VERSION = 2;
-export const ASSET_VERSION = '3.4.0';
+export const ASSET_VERSION = '3.5.0';
 
 export const DEFAULT_SETTINGS = {
   schemaVersion: SCHEMA_VERSION,
   presetId: 'midnight-train',
   followHostTheme: false,
+  adaptiveTheme: false,
   colors: { ...BUILTIN_PRESETS[0].colors },
   customPresets: [],
   wallpaper: {
-    kind: 'builtin', // 'builtin' | 'custom' | 'none'
+    kind: 'builtin', // 'builtin' | 'custom' | 'online' | 'none'
     id: 'starry-ocean-train',
+    onlineSource: 'all', // 'all' | 'catppuccin' | 'nordic' | 'bing' | 'wikimedia'
+    onlineMeta: null,
     opacity: 100,
     blur: 4,
     darkness: 6,
@@ -196,6 +199,7 @@ export class PrismStorage {
   constructor() {
     this.dataDir = resolveDataDir();
     this.customWallpapersDir = join(this.dataDir, 'custom_wallpapers');
+    this.onlineWallpapersDir = join(this.dataDir, 'online_wallpapers');
     this.settingsPath = join(this.dataDir, 'settings.json');
     this.companionConfigPath = join(this.dataDir, 'companion_config.json');
     this.binDir = join(this.dataDir, 'bin');
@@ -205,6 +209,7 @@ export class PrismStorage {
   #ensureDirs() {
     mkdirSync(this.dataDir, { recursive: true });
     mkdirSync(this.customWallpapersDir, { recursive: true });
+    mkdirSync(this.onlineWallpapersDir, { recursive: true });
     mkdirSync(this.binDir, { recursive: true });
   }
 
@@ -302,11 +307,69 @@ export class PrismStorage {
     return false;
   }
 
+  saveOnlineWallpaper(buffer, ext = '.jpg', meta = {}) {
+    this.#ensureDirs();
+    const safeExt = ['.jpg', '.png', '.webp'].includes(ext) ? ext : '.jpg';
+    const file = `online-${Date.now()}${safeExt}`;
+    const targetPath = join(this.onlineWallpapersDir, file);
+    writeFileSync(targetPath, buffer);
+    // Keep only the latest 3 online preview files to save disk space
+    try {
+      const oldFiles = readdirSync(this.onlineWallpapersDir)
+        .filter((f) => f !== file)
+        .sort()
+        .reverse();
+      for (const old of oldFiles.slice(2)) {
+        try {
+          unlinkSync(join(this.onlineWallpapersDir, old));
+        } catch {
+          // ignore
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return {
+      kind: 'online',
+      id: file,
+      meta: {
+        name: String(meta.name || '在线壁纸'),
+        sourceId: String(meta.sourceId || ''),
+        sourceLabel: String(meta.sourceLabel || '开源图库'),
+        url: String(meta.url || ''),
+        fetchedAt: Date.now(),
+      },
+    };
+  }
+
+  collectOnlineWallpaper(id, name = '') {
+    this.#ensureDirs();
+    const safe = basename(String(id || ''));
+    const srcPath = join(this.onlineWallpapersDir, safe);
+    if (!safe || !existsSync(srcPath)) {
+      throw new Error('当前在线壁纸已失效，请重新随机');
+    }
+    const ext = extname(safe).toLowerCase() || '.jpg';
+    const safeBase =
+      String(name || 'online_wallpaper')
+        .replace(/\.[^.]+$/, '')
+        .replace(/[^\p{L}\p{N}_-]+/gu, '_')
+        .slice(0, 36) || 'online_wallpaper';
+    const file = `${Date.now()}-${safeBase}${ext}`;
+    copyFileSync(srcPath, join(this.customWallpapersDir, file));
+    return { id: file, name: safeBase, file, kind: 'custom' };
+  }
+
   resolveWallpaperPath(wallpaper) {
     if (!wallpaper || wallpaper.kind === 'none') return '';
     if (wallpaper.kind === 'custom') {
       const safe = basename(String(wallpaper.id || ''));
       const fullPath = join(this.customWallpapersDir, safe);
+      return existsSync(fullPath) ? fullPath : '';
+    }
+    if (wallpaper.kind === 'online') {
+      const safe = basename(String(wallpaper.id || ''));
+      const fullPath = join(this.onlineWallpapersDir, safe);
       return existsSync(fullPath) ? fullPath : '';
     }
     const found = BUILTIN_WALLPAPERS.find((w) => w.id === wallpaper.id);
