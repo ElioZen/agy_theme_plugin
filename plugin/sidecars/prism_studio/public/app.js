@@ -16,7 +16,14 @@
   let manualConversationId = '';
   let currentPage = 'cockpit';
   let modelsExpanded = false;
+  let overviewExpanded = false;
   let agentsExpanded = false;
+  let statsLevel = 'overview'; // 'overview' | 'detail'
+  let statsChart = 'donut'; // 'donut' | 'bar'
+  let statsMetric = 'tokens'; // 'tokens' | 'calls'
+  let drilledModel = '';
+  let lastOverviewGroups = [];
+  let lastOverviewTotals = { tokens: 0, turns: 0 };
   const MAX_COLLAPSED_MODELS = 4;
   const MAX_COLLAPSED_AGENTS = 4;
 
@@ -655,15 +662,208 @@
     $('#sum-output').textContent = formatCompact(dataBlock.output);
 
     const models = dataBlock.models || [];
-    if (models.length) {
-      $('#stats-ratio-bar').innerHTML = models
-        .map(
-          (m) =>
-            `<span style="width:${Math.max(2, m.sharePercent)}%;background:${m.color}" title="${escapeHtml(m.displayName)} (${m.sourceLabel}) ${m.sharePercent}%"></span>`,
-        )
+    if (drilledModel && !models.some((m) => m.displayName === drilledModel)) {
+      drilledModel = '';
+    }
+
+    // Aggregate Level-1 overview by model (merging AGY GUI + AGY CLI for same model)
+    const groupedMap = new Map();
+    for (const m of models) {
+      let g = groupedMap.get(m.displayName);
+      if (!g) {
+        g = {
+          displayName: m.displayName,
+          color: m.color,
+          totalTokens: 0,
+          cacheRead: 0,
+          uncachedInput: 0,
+          output: 0,
+          turns: 0,
+          costUsd: 0,
+          sources: new Set(),
+        };
+        groupedMap.set(m.displayName, g);
+      }
+      g.totalTokens += Number(m.totalTokens || 0);
+      g.cacheRead += Number(m.cacheRead || 0);
+      g.uncachedInput += Number(m.uncachedInput || 0);
+      g.output += Number(m.output || 0);
+      g.turns += Number(m.turns || 0);
+      g.costUsd += Number(m.costUsd || 0);
+      if (m.sourceLabel) g.sources.add(m.sourceLabel);
+    }
+
+    const grandTokens = Math.max(1, [...groupedMap.values()].reduce((s, x) => s + x.totalTokens, 0));
+    const grandTurns = Math.max(1, [...groupedMap.values()].reduce((s, x) => s + x.turns, 0));
+    const overviewGroups = [...groupedMap.values()]
+      .map((g) => {
+        const tot = Math.max(1, g.totalTokens);
+        const cachePct = (g.cacheRead / tot) * 100;
+        const uncachedPct = (g.uncachedInput / tot) * 100;
+        const outputPct = Math.max(0, 100 - cachePct - uncachedPct);
+        const promptTot = g.cacheRead + g.uncachedInput;
+        return {
+          ...g,
+          sourceList: [...g.sources],
+          tokenSharePct: (g.totalTokens / grandTokens) * 100,
+          callSharePct: (g.turns / grandTurns) * 100,
+          cachePct,
+          uncachedPct,
+          outputPct,
+          promptCacheHitRate: promptTot > 0 ? (g.cacheRead / promptTot) * 100 : 0,
+        };
+      })
+      .sort((a, b) => (statsMetric === 'calls' ? b.turns - a.turns : b.totalTokens - a.totalTokens));
+
+    lastOverviewGroups = overviewGroups;
+    lastOverviewTotals = {
+      tokens: [...groupedMap.values()].reduce((s, x) => s + x.totalTokens, 0),
+      turns: [...groupedMap.values()].reduce((s, x) => s + x.turns, 0),
+    };
+
+    // Sync Level 1 / Level 2 toolbar controls
+    const isDrilled = Boolean(drilledModel && statsLevel === 'detail');
+    $('#stats-level-group').hidden = isDrilled;
+    $('#btn-drill-back').hidden = !isDrilled;
+    if (isDrilled) $('#drill-model-label').textContent = drilledModel;
+
+    document.querySelectorAll('#stats-level-group .seg-btn').forEach((b) => {
+      b.classList.toggle('active', b.dataset.level === statsLevel);
+    });
+    document.querySelectorAll('#stats-metric-group .seg-btn').forEach((b) => {
+      b.classList.toggle('active', b.dataset.metric === statsMetric);
+    });
+    document.querySelectorAll('#stats-chart-group .seg-btn').forEach((b) => {
+      b.classList.toggle('active', b.dataset.chart === statsChart);
+    });
+    $('#stats-overview-controls').hidden = statsLevel !== 'overview';
+    $('#stats-overview-panel').hidden = statsLevel !== 'overview';
+    $('#stats-detail-panel').hidden = statsLevel !== 'detail';
+
+    // Render LEVEL 1: Overview (Donut or Comparative Bar + 3-way composition + click to drill down)
+    if (statsLevel === 'overview') {
+      const ovPanel = $('#stats-overview-panel');
+      if (!overviewGroups.length) {
+        ovPanel.innerHTML = `<div class="model-row"><div class="card-sub">当前筛选条件下暂无 Token 记录</div></div>`;
+      } else {
+        const visibleGroups = overviewExpanded ? overviewGroups : overviewGroups.slice(0, MAX_COLLAPSED_MODELS);
+        const hiddenCount = Math.max(0, overviewGroups.length - MAX_COLLAPSED_MODELS);
+        const maxMetricVal = Math.max(
+          1,
+          ...overviewGroups.map((g) => (statsMetric === 'calls' ? g.turns : g.totalTokens)),
+        );
+
+        const renderOverviewItem = (g, showCompareBar) => {
+          const share = statsMetric === 'calls' ? g.callSharePct : g.tokenSharePct;
+          const mainVal = statsMetric === 'calls' ? `${formatNumber(g.turns)} 次` : formatCompact(g.totalTokens);
+          const subVal = statsMetric === 'calls' ? formatCompact(g.totalTokens) : `${formatNumber(g.turns)} 次`;
+          const relWidth =
+            ((statsMetric === 'calls' ? g.turns : g.totalTokens) / maxMetricVal) * 100;
+          return `
+            <div class="overview-model-item" data-drill-model="${escapeHtml(g.displayName)}" data-hover-model="${escapeHtml(g.displayName)}">
+              <div class="overview-item-top">
+                <div class="overview-item-name">
+                  <span class="ratio-swatch" style="background:${g.color}"></span>
+                  <span class="name">${escapeHtml(g.displayName)}</span>
+                  ${g.sourceList.length > 1 ? `<span class="src-badge">${g.sourceList.length}来源</span>` : ''}
+                  <span class="overview-drill-hint">›</span>
+                </div>
+                <span class="overview-item-nums tabular"><strong>${share.toFixed(1)}%</strong> · ${mainVal}</span>
+              </div>
+              ${
+                showCompareBar
+                  ? `<div class="overview-bar-track"><div class="overview-bar-fill" style="width:${Math.max(2, relWidth)}%;background:${g.color}"></div></div>`
+                  : ''
+              }
+              <div class="overview-comp-bar" title="缓存 ${g.cachePct.toFixed(1)}% · 未命中 ${g.uncachedPct.toFixed(1)}% · 输出 ${g.outputPct.toFixed(1)}%">
+                <span style="width:${g.cachePct}%;background:var(--prism-tertiary)"></span>
+                <span style="width:${g.uncachedPct}%;background:var(--prism-accent)"></span>
+                <span style="width:${g.outputPct}%;background:var(--prism-secondary)"></span>
+              </div>
+              <div class="overview-comp-meta tabular">
+                <span class="overview-comp-pcts">
+                  <span class="c-cache">缓 ${g.cachePct.toFixed(1)}%</span>
+                  <span class="c-in">新 ${g.uncachedPct.toFixed(1)}%</span>
+                  <span class="c-out">出 ${g.outputPct.toFixed(1)}%</span>
+                </span>
+                <span>${subVal}</span>
+              </div>
+            </div>
+          `;
+        };
+
+        const expandBtnHtml =
+          hiddenCount > 0
+            ? `<button type="button" class="expand-list-btn" data-toggle-expand="overview">${
+                overviewExpanded
+                  ? '收起模型列表 ▴'
+                  : `展开其余 ${hiddenCount} 个模型（共 ${overviewGroups.length} 个）▾`
+              }</button>`
+            : '';
+
+        if (statsChart === 'donut') {
+          const radius = 46;
+          const circ = 2 * Math.PI * radius;
+          const gap = overviewGroups.length > 1 ? 2.2 : 0;
+          let acc = 0;
+          const arcsHtml = overviewGroups
+            .map((g) => {
+              const frac = Math.max(0, (statsMetric === 'calls' ? g.callSharePct : g.tokenSharePct) / 100);
+              const rawLen = frac * circ;
+              const segLen = Math.max(rawLen > 0 ? 1.8 : 0, rawLen - gap);
+              const offset = -acc;
+              acc += rawLen;
+              return `<circle class="donut-slice" cx="62" cy="62" r="${radius}" stroke="${g.color}" style="color:${g.color}" stroke-dasharray="${segLen.toFixed(2)} ${circ.toFixed(2)}" stroke-dashoffset="${offset.toFixed(2)}" transform="rotate(-90 62 62)" data-drill-model="${escapeHtml(g.displayName)}" data-hover-model="${escapeHtml(g.displayName)}"><title>${escapeHtml(g.displayName)} · ${(frac * 100).toFixed(1)}% · ${formatCompact(g.totalTokens)}</title></circle>`;
+            })
+            .join('');
+
+          const centerVal =
+            statsMetric === 'calls'
+              ? `${formatNumber(lastOverviewTotals.turns)} 次`
+              : formatCompact(lastOverviewTotals.tokens);
+          const centerSub = `${overviewGroups.length} 个模型`;
+
+          ovPanel.innerHTML = `
+            <div class="overview-donut-layout">
+              <div class="donut-wrap">
+                <svg class="overview-donut-svg" id="overview-donut-svg" viewBox="0 0 124 124">
+                  <circle class="donut-track" cx="62" cy="62" r="${radius}" />
+                  ${arcsHtml}
+                </svg>
+                <div class="donut-center tabular">
+                  <span id="donut-center-val" class="donut-center-val">${centerVal}</span>
+                  <span id="donut-center-sub" class="donut-center-sub">${centerSub}</span>
+                </div>
+              </div>
+              <div class="overview-legend-list">
+                ${visibleGroups.map((g) => renderOverviewItem(g, false)).join('')}
+              </div>
+            </div>
+            ${expandBtnHtml}
+          `;
+        } else {
+          ovPanel.innerHTML = `
+            <div class="overview-legend-list">
+              ${visibleGroups.map((g) => renderOverviewItem(g, true)).join('')}
+            </div>
+            ${expandBtnHtml}
+          `;
+        }
+      }
+    }
+
+    // Render LEVEL 2: Existing Detailed Source-Split Model List (supports drill-down filter)
+    const detailModels = isDrilled ? models.filter((m) => m.displayName === drilledModel) : models;
+    if (detailModels.length) {
+      const detailGrand = Math.max(1, detailModels.reduce((s, x) => s + Number(x.totalTokens || 0), 0));
+      $('#stats-ratio-bar').innerHTML = detailModels
+        .map((m) => {
+          const pct = isDrilled ? (m.totalTokens / detailGrand) * 100 : m.sharePercent;
+          return `<span style="width:${Math.max(2, pct)}%;background:${m.color}" title="${escapeHtml(m.displayName)} (${m.sourceLabel}) ${pct.toFixed(1)}%"></span>`;
+        })
         .join('');
-      const visibleModels = modelsExpanded ? models : models.slice(0, MAX_COLLAPSED_MODELS);
-      const hiddenModelsCount = Math.max(0, models.length - MAX_COLLAPSED_MODELS);
+      const visibleModels = modelsExpanded || isDrilled ? detailModels : detailModels.slice(0, MAX_COLLAPSED_MODELS);
+      const hiddenModelsCount = isDrilled ? 0 : Math.max(0, detailModels.length - MAX_COLLAPSED_MODELS);
       $('#stats-models-list').innerHTML =
         visibleModels
           .map((m) => {
@@ -671,6 +871,7 @@
             const wCache = (m.cacheRead / tot) * 100;
             const wIn = (m.uncachedInput / tot) * 100;
             const wOut = (m.output / tot) * 100;
+            const pctShow = isDrilled ? (m.totalTokens / detailGrand) * 100 : m.sharePercent;
             return `
               <div class="model-row">
                 <div class="model-row-top">
@@ -679,7 +880,7 @@
                     <span class="model-row-name">${escapeHtml(m.displayName)}</span>
                     <span class="src-badge ${escapeHtml(m.sourceKind)}">${escapeHtml(m.sourceLabel)}</span>
                   </div>
-                  <span class="model-row-nums tabular"><strong>${m.sharePercent.toFixed(1)}%</strong> · ${formatCompact(m.totalTokens)}</span>
+                  <span class="model-row-nums tabular"><strong>${pctShow.toFixed(1)}%</strong> · ${formatCompact(m.totalTokens)}</span>
                 </div>
                 <div class="stacked-bar">
                   <span style="width:${wCache}%;background:var(--prism-tertiary)"></span>
@@ -696,7 +897,7 @@
           .join('') +
         (hiddenModelsCount > 0
           ? `<button type="button" class="expand-list-btn" data-toggle-expand="models">${
-              modelsExpanded ? '收起模型明细 ▴' : `展开其余 ${hiddenModelsCount} 项模型（共 ${models.length} 项）▾`
+              modelsExpanded ? '收起模型明细 ▴' : `展开其余 ${hiddenModelsCount} 项模型（共 ${detailModels.length} 项）▾`
             }</button>`
           : '');
     } else {
@@ -1094,6 +1295,86 @@
       if (!btn) return;
       await queueSaveSettings({ telemetry: { sourceFilter: btn.dataset.source } }, true);
       await loadTelemetry();
+    });
+
+    // Level 1 / Level 2 view switcher, chart type, metric toggle & interactive drill-down
+    $('#stats-level-group').addEventListener('click', (e) => {
+      const btn = e.target.closest('.seg-btn');
+      if (!btn) return;
+      statsLevel = btn.dataset.level === 'detail' ? 'detail' : 'overview';
+      if (statsLevel === 'overview') drilledModel = '';
+      renderCockpit();
+    });
+
+    $('#stats-metric-group').addEventListener('click', (e) => {
+      const btn = e.target.closest('.seg-btn');
+      if (!btn) return;
+      statsMetric = btn.dataset.metric === 'calls' ? 'calls' : 'tokens';
+      renderCockpit();
+    });
+
+    $('#stats-chart-group').addEventListener('click', (e) => {
+      const btn = e.target.closest('.seg-btn');
+      if (!btn) return;
+      statsChart = btn.dataset.chart === 'bar' ? 'bar' : 'donut';
+      renderCockpit();
+    });
+
+    $('#btn-drill-back').addEventListener('click', () => {
+      drilledModel = '';
+      statsLevel = 'overview';
+      renderCockpit();
+    });
+
+    const applyOverviewHover = (modelName) => {
+      const panel = $('#stats-overview-panel');
+      if (!panel) return;
+      const svg = $('#overview-donut-svg');
+      if (svg) svg.classList.toggle('has-hover', Boolean(modelName));
+      panel.querySelectorAll('[data-hover-model]').forEach((el) => {
+        el.classList.toggle('is-hovered', Boolean(modelName) && el.dataset.hoverModel === modelName);
+      });
+      const valEl = $('#donut-center-val');
+      const subEl = $('#donut-center-sub');
+      if (!valEl || !subEl) return;
+      if (modelName) {
+        const g = lastOverviewGroups.find((x) => x.displayName === modelName);
+        if (g) {
+          const share = statsMetric === 'calls' ? g.callSharePct : g.tokenSharePct;
+          valEl.textContent = `${share.toFixed(1)}%`;
+          subEl.textContent =
+            statsMetric === 'calls' ? `${formatNumber(g.turns)} 次` : formatCompact(g.totalTokens);
+          return;
+        }
+      }
+      valEl.textContent =
+        statsMetric === 'calls'
+          ? `${formatNumber(lastOverviewTotals.turns)} 次`
+          : formatCompact(lastOverviewTotals.tokens);
+      subEl.textContent = `${lastOverviewGroups.length} 个模型`;
+    };
+
+    $('#stats-overview-panel').addEventListener('mouseover', (e) => {
+      const target = e.target.closest('[data-hover-model]');
+      applyOverviewHover(target ? target.dataset.hoverModel : '');
+    });
+
+    $('#stats-overview-panel').addEventListener('mouseleave', () => {
+      applyOverviewHover('');
+    });
+
+    $('#stats-overview-panel').addEventListener('click', (e) => {
+      const expBtn = e.target.closest('[data-toggle-expand="overview"]');
+      if (expBtn) {
+        overviewExpanded = !overviewExpanded;
+        renderCockpit();
+        return;
+      }
+      const drill = e.target.closest('[data-drill-model]');
+      if (!drill) return;
+      drilledModel = drill.dataset.drillModel;
+      statsLevel = 'detail';
+      renderCockpit();
     });
 
     // Quick Project Switcher Strip (fixed promise sequencing — switches active highlight immediately!)

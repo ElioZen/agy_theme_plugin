@@ -82,8 +82,35 @@
             <span><i class="dot secondary"></i>输出 <strong id="sum-output">0</strong></span>
           </div>
 
-          <div id="stats-ratio-bar" class="ratio-bar"></div>
-          <div id="stats-models-list" class="models-list"></div>
+          <div class="stats-viz-toolbar">
+            <div class="stats-viz-left">
+              <div class="seg-group" id="stats-level-group">
+                <button class="seg-btn active" data-level="overview">占比总览</button>
+                <button class="seg-btn" data-level="detail">来源明细</button>
+              </div>
+              <button id="btn-drill-back" class="drill-back-pill" type="button" hidden>
+                <span>← 返回总览</span>
+                <strong id="drill-model-label"></strong>
+              </button>
+            </div>
+            <div class="stats-viz-right" id="stats-overview-controls">
+              <div class="seg-group" id="stats-metric-group">
+                <button class="seg-btn active" data-metric="tokens">按量</button>
+                <button class="seg-btn" data-metric="calls">按次</button>
+              </div>
+              <div class="seg-group" id="stats-chart-group">
+                <button class="seg-btn active" data-chart="donut">环形</button>
+                <button class="seg-btn" data-chart="bar">条形</button>
+              </div>
+            </div>
+          </div>
+
+          <div id="stats-overview-panel" class="stats-overview-panel"></div>
+
+          <div id="stats-detail-panel" hidden>
+            <div id="stats-ratio-bar" class="ratio-bar"></div>
+            <div id="stats-models-list" class="models-list"></div>
+          </div>
           <div id="projects-switch-strip" class="projects-mini-grid"></div>
         </div>
 
