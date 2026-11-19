@@ -739,7 +739,12 @@ function parseCodexSession(filePath, statInfo) {
   let firstUserPrompt = '';
   let turnCount = 0;
   let prevUsage = null;
+  let prevTokenTs = 0;
+  let prevContextTokens = 0;
+  let contextWindowLimit = 0;
+  let lastContextTokens = 0;
   const turns = [];
+  const checkpoints = [];
 
   const lines = text.split('\n');
   const tailStartIdx = Math.max(0, lines.length - 50);
@@ -759,7 +764,8 @@ function parseCodexSession(filePath, statInfo) {
       !line.includes('"thread_settings_applied"') &&
       !line.includes('"task_started"') &&
       !line.includes('"task_complete"') &&
-      !line.includes('"turn_aborted"')
+      !line.includes('"turn_aborted"') &&
+      !line.includes('compact')
     ) {
       continue;
     }
@@ -824,16 +830,69 @@ function parseCodexSession(filePath, statInfo) {
         }
         prevUsage = { input_tokens: curIn, cached_input_tokens: curCached, output_tokens: curOut };
 
+        if (p.info.model_context_window) {
+          const win = Number(p.info.model_context_window || 0);
+          if (win > 0) contextWindowLimit = win;
+        }
+        const lu = p.info.last_token_usage || null;
+        const curCtx = lu ? Number(lu.total_tokens || Number(lu.input_tokens || 0) + Number(lu.output_tokens || 0)) : 0;
+
         if (dIn > 0 || dCached > 0 || dOut > 0) {
           const clampedCached = Math.min(dIn, dCached);
+          // Detect automatic compaction drop in Codex context size
+          if (prevContextTokens >= 150000 && curCtx > 0 && curCtx < prevContextTokens * 0.55) {
+            checkpoints.push({
+              stepIndex: turns.length,
+              startMs: ts,
+              endMs: ts,
+              durationMs: null,
+              preTokens: prevContextTokens,
+              summaryTokens: curCtx,
+              postTokens: curCtx,
+              inProgress: false,
+            });
+            turns.push({
+              stepIndex: turns.length,
+              ts,
+              model: model || 'codex',
+              effort,
+              uncachedInput: 0,
+              cacheRead: 0,
+              output: 0,
+              contextTokens: curCtx,
+              tokPerSec: null,
+              isCheckpoint: true,
+            });
+          }
+
+          let tokPerSec = null;
+          if (prevTokenTs > 0 && ts > prevTokenTs && dOut >= 15) {
+            const deltaSec = (ts - prevTokenTs) / 1000;
+            if (deltaSec >= 0.8 && deltaSec <= 240) {
+              const rate = dOut / deltaSec;
+              if (rate > 0.5 && rate < 450) tokPerSec = Math.round(rate * 10) / 10;
+            }
+          }
+
           turns.push({
+            stepIndex: turns.length + 1,
             ts,
             model: model || 'codex',
             effort,
             uncachedInput: Math.max(0, dIn - clampedCached),
             cacheRead: clampedCached,
             output: dOut,
+            contextTokens: curCtx || dIn + dOut,
+            tokPerSec,
+            isCheckpoint: false,
           });
+          if (curCtx > 0) {
+            lastContextTokens = curCtx;
+            prevContextTokens = curCtx;
+          }
+          if (ts > 0) prevTokenTs = ts;
+        } else if (curCtx > 0) {
+          lastContextTokens = curCtx;
         }
 
         inputTokens = curIn;
@@ -841,6 +900,19 @@ function parseCodexSession(filePath, statInfo) {
         outputTokens = curOut;
         reasoningTokens = curReason;
         totalTokens = curTot;
+      } else if (String(p.type || '').toLowerCase().includes('compact')) {
+        if (prevContextTokens > 0) {
+          checkpoints.push({
+            stepIndex: turns.length,
+            startMs: ts,
+            endMs: ts,
+            durationMs: null,
+            preTokens: prevContextTokens,
+            summaryTokens: 0,
+            postTokens: 0,
+            inProgress: false,
+          });
+        }
       } else if (p.type === 'user_message' && !firstUserPrompt && p.message) {
         const msg = String(p.message).trim();
         if (msg && !msg.startsWith('<') && !msg.startsWith('# AGENTS')) {
@@ -915,6 +987,11 @@ function parseCodexSession(filePath, statInfo) {
     reasoningTokens,
     turnCount,
     turns,
+    checkpoints,
+    contextWindowLimit,
+    lastContextTokens,
+    lastModel: model || 'codex',
+    lastEffort: effort,
     lastActiveMs: Math.max(lastEventTs, statInfo.mtimeMs),
     mtimeMs: statInfo.mtimeMs,
     isCompleted,
@@ -1175,11 +1252,189 @@ function getRangeCutoffMs(range) {
   return 0;
 }
 
+function buildContextSnapshotFromSource(source, { isCodex = false, fallbackLimit = 512000, nowMs = Date.now(), targetMeta = null } = {}) {
+  const turns = source?.turns || [];
+  const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
+  const nonCheckpointTurns = turns.filter((t) => !t.isCheckpoint);
+  const latestModelTurn = nonCheckpointTurns.length > 0 ? nonCheckpointTurns[nonCheckpointTurns.length - 1] : null;
+
+  const nativeLimit = isCodex && Number(source?.contextWindowLimit || 0) > 0 ? Number(source.contextWindowLimit) : 0;
+  const limit = nativeLimit || Math.max(32000, Number(fallbackLimit) || 512000);
+  const usedTokens = isCodex
+    ? Number(source?.lastContextTokens || latestModelTurn?.contextTokens || latestTurn?.contextTokens || 0)
+    : latestTurn
+    ? Number(latestTurn.contextTokens || 0)
+    : 0;
+  const usedPercent = Math.min(100, Math.round((usedTokens / limit) * 1000) / 10);
+  const remainingTokens = Math.max(0, limit - usedTokens);
+
+  let systemBase = 0;
+  let thinkingTokens = 0;
+  let dialogTokens = 0;
+  let toolTokens = 0;
+  if (usedTokens > 0) {
+    systemBase = Math.min(usedTokens, Math.round(Math.min(isCodex ? 18000 : 14000, usedTokens * 0.22)));
+    const variableTokens = Math.max(0, usedTokens - systemBase);
+    if (isCodex) {
+      // Codex logs don't expose char-level role weights; estimate split from reasoning/output ratio
+      const reasonShare =
+        source?.output > 0 ? Math.min(0.28, (Number(source.reasoningTokens || 0) / Math.max(1, source.output)) * 0.16) : 0.08;
+      thinkingTokens = Math.round(variableTokens * reasonShare);
+      dialogTokens = Math.round(variableTokens * 0.12);
+      toolTokens = Math.max(0, variableTokens - thinkingTokens - dialogTokens);
+    } else {
+      const w = source?.charWeights || { user: 0, assistant: 0, thinking: 0, tool: 0 };
+      const weightSum = Math.max(1, w.user + w.assistant + w.thinking + w.tool);
+      thinkingTokens = Math.round(variableTokens * (w.thinking / weightSum));
+      dialogTokens = Math.round(variableTokens * ((w.user + w.assistant) / weightSum));
+      toolTokens = Math.max(0, variableTokens - thinkingTokens - dialogTokens);
+    }
+  }
+
+  const lastTurnPrompt = latestModelTurn ? latestModelTurn.uncachedInput + latestModelTurn.cacheRead : 0;
+  const lastTurnCacheHitRate =
+    lastTurnPrompt > 0 ? Math.round((latestModelTurn.cacheRead / lastTurnPrompt) * 1000) / 10 : null;
+  const isCacheDrop = Boolean(
+    latestModelTurn &&
+      nonCheckpointTurns.length >= 2 &&
+      lastTurnPrompt >= 12000 &&
+      (lastTurnCacheHitRate < 35 || (latestModelTurn.uncachedInput >= 50000 && lastTurnCacheHitRate < 65)),
+  );
+  const lastTurnCache = {
+    hitRate: lastTurnCacheHitRate,
+    cacheRead: latestModelTurn?.cacheRead || 0,
+    uncachedInput: latestModelTurn?.uncachedInput || 0,
+    isDrop: isCacheDrop,
+  };
+
+  const checkpoints = source?.checkpoints || [];
+  const lastCp = checkpoints.length > 0 ? checkpoints[checkpoints.length - 1] : null;
+  const totalCpDurationMs = checkpoints.reduce(
+    (acc, c) => acc + (typeof c.durationMs === 'number' ? c.durationMs : 0),
+    0,
+  );
+
+  let lastCpTurnIdx = -1;
+  for (let i = turns.length - 1; i >= 0; i -= 1) {
+    if (turns[i].isCheckpoint) {
+      lastCpTurnIdx = i;
+      break;
+    }
+  }
+  const cycleTurns = turns.slice(lastCpTurnIdx + 1).filter((t) => !t.isCheckpoint && t.contextTokens > 0);
+  let avgGrowthPerTurn = 0;
+  let estTurnsToLimit = null;
+  if (cycleTurns.length >= 2) {
+    let avgDelta = (cycleTurns[cycleTurns.length - 1].contextTokens - cycleTurns[0].contextTokens) / (cycleTurns.length - 1);
+    if (avgDelta < 50) {
+      const posDeltas = [];
+      for (let i = 1; i < cycleTurns.length; i += 1) {
+        const d = cycleTurns[i].contextTokens - cycleTurns[i - 1].contextTokens;
+        if (d > 0) posDeltas.push(d);
+      }
+      if (posDeltas.length) {
+        avgDelta = posDeltas.reduce((a, b) => a + b, 0) / posDeltas.length;
+      }
+    }
+    if (avgDelta >= 50) {
+      avgGrowthPerTurn = Math.round(avgDelta);
+      estTurnsToLimit = Math.max(0, Math.round(remainingTokens / avgDelta));
+    }
+  }
+
+  const preTokens = lastCp?.preTokens || 0;
+  const postTokens = lastCp?.postTokens || lastCp?.summaryTokens || 0;
+  const freedPercent =
+    preTokens > 0 && postTokens > 0 && preTokens > postTokens
+      ? Math.round(((preTokens - postTokens) / preTokens) * 1000) / 10
+      : null;
+
+  let sessUncached = 0;
+  let sessCache = 0;
+  for (const t of turns) {
+    sessUncached += Number(t.uncachedInput || 0);
+    sessCache += Number(t.cacheRead || 0);
+  }
+  const sessPromptTot = sessUncached + sessCache;
+  const effectiveInputRatio =
+    sessPromptTot > 0 ? Math.round(((sessUncached + sessCache * 0.1) / sessPromptTot) * 1000) / 10 : null;
+  const savedInputPercent =
+    effectiveInputRatio !== null ? Math.round((100 - effectiveInputRatio) * 10) / 10 : null;
+
+  const compaction = {
+    count: checkpoints.length,
+    lastAtMs: lastCp?.startMs || 0,
+    lastDurationMs:
+      lastCp && typeof lastCp.durationMs === 'number'
+        ? lastCp.durationMs
+        : lastCp && lastCp.inProgress && lastCp.startMs
+        ? Math.max(0, nowMs - lastCp.startMs)
+        : null,
+    inProgress: Boolean(lastCp?.inProgress),
+    preTokens,
+    postTokens,
+    freedPercent,
+    avgGrowthPerTurn,
+    estTurnsToLimit,
+    effectiveInputRatio,
+    savedInputPercent,
+    totalDurationMs: totalCpDurationMs,
+  };
+
+  const speedPoints = turns
+    .filter((t) => typeof t.tokPerSec === 'number')
+    .slice(-14)
+    .map((t) => ({ step: t.stepIndex, rate: t.tokPerSec, ts: t.ts }));
+  const latestSpeed = speedPoints.length > 0 ? speedPoints[speedPoints.length - 1].rate : 0;
+  const avgSpeed =
+    speedPoints.length > 0
+      ? Math.round((speedPoints.reduce((acc, p) => acc + p.rate, 0) / speedPoints.length) * 10) / 10
+      : 0;
+  const rawModel = source?.lastModel || latestModelTurn?.model || latestTurn?.model || '';
+  const explicitEffort = isCodex ? source?.lastEffort || source?.effort || '' : '';
+  const parsedLastModel = parseModelAndEffort(rawModel, explicitEffort);
+
+  return {
+    used: usedTokens,
+    limit,
+    isNativeLimit: nativeLimit > 0,
+    percent: usedPercent,
+    remaining: remainingTokens,
+    target: targetMeta || {
+      key: 'main',
+      isMain: true,
+      kind: 'gui',
+      kindLabel: '主会话',
+      title: '当前会话',
+      projectName: '',
+    },
+    lastTurnCache,
+    compaction,
+    breakdown: {
+      system: systemBase,
+      thinking: thinkingTokens,
+      dialog: dialogTokens,
+      tools: toolTokens,
+      remaining: remainingTokens,
+    },
+    speed: {
+      latest: latestSpeed,
+      average: avgSpeed,
+      sparkline: speedPoints,
+      model: parsedLastModel.baseModel,
+      effort: parsedLastModel.effort,
+      rawModel,
+      turnCount: nonCheckpointTurns.length,
+    },
+  };
+}
+
 export function buildTelemetrySnapshot({
   conversationId = '',
   hostConversationId = '',
   activeWorkspaceUri = '',
   selectedProjectId = '',
+  contextTarget = 'main',
   followLatest = true,
   statsScope = 'project', // 'project' | 'session' | 'all'
   sourceFilter = 'all', // 'all' | 'gui' | 'agy-cli' | 'codex-cli'
@@ -1315,11 +1570,10 @@ export function buildTelemetrySnapshot({
     }
   }
 
-  // Active conversation metadata & REAL-TIME CONTEXT WINDOW (completely separate card!)
+  // Active conversation metadata
   const activeSummary = summaryById.get(activeConvId);
   const activeData = parsedDesktop.get(activeConvId) || parsedAgyCli.get(activeConvId) || null;
   const activeTurns = activeData?.turns || [];
-  const latestTurn = activeTurns.length > 0 ? activeTurns[activeTurns.length - 1] : null;
   const activeConvObj = {
     id: activeConvId,
     title: activeSummary?.title || (activeConvId ? '当前会话' : '暂无会话'),
@@ -1329,126 +1583,6 @@ export function buildTelemetrySnapshot({
     statusLabel: activeSummary?.statusLabel || '就绪',
     stepCount: activeSummary?.stepCount || activeData?.totalSteps || 0,
   };
-
-  const limit = Math.max(32000, Number(windowLimit) || 512000);
-  const usedTokens = latestTurn ? latestTurn.contextTokens : 0;
-  const usedPercent = Math.min(100, Math.round((usedTokens / limit) * 1000) / 10);
-
-  const systemBase = usedTokens > 0 ? Math.min(usedTokens, Math.round(Math.min(14000, usedTokens * 0.22))) : 0;
-  const variableTokens = Math.max(0, usedTokens - systemBase);
-  const w = activeData?.charWeights || { user: 0, assistant: 0, thinking: 0, tool: 0 };
-  const weightSum = Math.max(1, w.user + w.assistant + w.thinking + w.tool);
-  const thinkingTokens = Math.round(variableTokens * (w.thinking / weightSum));
-  const dialogTokens = Math.round(variableTokens * ((w.user + w.assistant) / weightSum));
-  const toolTokens = Math.max(0, variableTokens - thinkingTokens - dialogTokens);
-  const remainingTokens = Math.max(0, limit - usedTokens);
-
-  const nonCheckpointTurns = activeTurns.filter((t) => !t.isCheckpoint);
-  const latestModelTurn = nonCheckpointTurns.length > 0 ? nonCheckpointTurns[nonCheckpointTurns.length - 1] : null;
-  const lastTurnPrompt = latestModelTurn ? latestModelTurn.uncachedInput + latestModelTurn.cacheRead : 0;
-  const lastTurnCacheHitRate =
-    lastTurnPrompt > 0 ? Math.round((latestModelTurn.cacheRead / lastTurnPrompt) * 1000) / 10 : null;
-  const isCacheDrop = Boolean(
-    latestModelTurn &&
-      nonCheckpointTurns.length >= 2 &&
-      lastTurnPrompt >= 12000 &&
-      (lastTurnCacheHitRate < 35 || (latestModelTurn.uncachedInput >= 50000 && lastTurnCacheHitRate < 65)),
-  );
-  const lastTurnCache = {
-    hitRate: lastTurnCacheHitRate,
-    cacheRead: latestModelTurn?.cacheRead || 0,
-    uncachedInput: latestModelTurn?.uncachedInput || 0,
-    isDrop: isCacheDrop,
-  };
-
-  const checkpoints = activeData?.checkpoints || [];
-  const lastCp = checkpoints.length > 0 ? checkpoints[checkpoints.length - 1] : null;
-  const totalCpDurationMs = checkpoints.reduce(
-    (acc, c) => acc + (typeof c.durationMs === 'number' ? c.durationMs : 0),
-    0,
-  );
-
-  // Derived compaction & context-efficiency metrics:
-  // 1) Estimated remaining turns before hitting windowLimit based on current compaction cycle's avg growth/turn
-  let lastCpTurnIdx = -1;
-  for (let i = activeTurns.length - 1; i >= 0; i -= 1) {
-    if (activeTurns[i].isCheckpoint) {
-      lastCpTurnIdx = i;
-      break;
-    }
-  }
-  const cycleTurns = activeTurns.slice(lastCpTurnIdx + 1).filter((t) => !t.isCheckpoint);
-  let avgGrowthPerTurn = 0;
-  let estTurnsToLimit = null;
-  if (cycleTurns.length >= 2) {
-    let avgDelta = (cycleTurns[cycleTurns.length - 1].contextTokens - cycleTurns[0].contextTokens) / (cycleTurns.length - 1);
-    if (avgDelta < 50) {
-      const posDeltas = [];
-      for (let i = 1; i < cycleTurns.length; i += 1) {
-        const d = cycleTurns[i].contextTokens - cycleTurns[i - 1].contextTokens;
-        if (d > 0) posDeltas.push(d);
-      }
-      if (posDeltas.length) {
-        avgDelta = posDeltas.reduce((a, b) => a + b, 0) / posDeltas.length;
-      }
-    }
-    if (avgDelta >= 50) {
-      avgGrowthPerTurn = Math.round(avgDelta);
-      estTurnsToLimit = Math.max(0, Math.round(remainingTokens / avgDelta));
-    }
-  }
-
-  // 2) Last compaction space freed ratio
-  const preTokens = lastCp?.preTokens || 0;
-  const postTokens = lastCp?.postTokens || lastCp?.summaryTokens || 0;
-  const freedPercent =
-    preTokens > 0 && postTokens > 0 && preTokens > postTokens
-      ? Math.round(((preTokens - postTokens) / preTokens) * 1000) / 10
-      : null;
-
-  // 3) Effective input cost ratio (cached input counted at 0.1x standard uncached input)
-  let sessUncached = 0;
-  let sessCache = 0;
-  for (const t of activeTurns) {
-    sessUncached += Number(t.uncachedInput || 0);
-    sessCache += Number(t.cacheRead || 0);
-  }
-  const sessPromptTot = sessUncached + sessCache;
-  const effectiveInputRatio =
-    sessPromptTot > 0 ? Math.round(((sessUncached + sessCache * 0.1) / sessPromptTot) * 1000) / 10 : null;
-  const savedInputPercent =
-    effectiveInputRatio !== null ? Math.round((100 - effectiveInputRatio) * 10) / 10 : null;
-
-  const compaction = {
-    count: checkpoints.length,
-    lastAtMs: lastCp?.startMs || 0,
-    lastDurationMs:
-      lastCp && typeof lastCp.durationMs === 'number'
-        ? lastCp.durationMs
-        : lastCp && lastCp.inProgress && lastCp.startMs
-        ? Math.max(0, nowMs - lastCp.startMs)
-        : null,
-    inProgress: Boolean(lastCp?.inProgress),
-    preTokens,
-    postTokens,
-    freedPercent,
-    avgGrowthPerTurn,
-    estTurnsToLimit,
-    effectiveInputRatio,
-    savedInputPercent,
-    totalDurationMs: totalCpDurationMs,
-  };
-
-  const speedPoints = activeTurns
-    .filter((t) => typeof t.tokPerSec === 'number')
-    .slice(-14)
-    .map((t) => ({ step: t.stepIndex, rate: t.tokPerSec, ts: t.ts }));
-  const latestSpeed = speedPoints.length > 0 ? speedPoints[speedPoints.length - 1].rate : 0;
-  const avgSpeed =
-    speedPoints.length > 0
-      ? Math.round((speedPoints.reduce((acc, p) => acc + p.rate, 0) / speedPoints.length) * 10) / 10
-      : 0;
-  const parsedLastModel = parseModelAndEffort(activeData?.lastModel || latestModelTurn?.model || latestTurn?.model || '');
 
   // ==================== UNIFIED PROJECT & SESSION STATS ====================
   const cutoffRangeMs = getRangeCutoffMs(range);
@@ -1610,9 +1744,11 @@ export function buildTelemetrySnapshot({
     const { baseModel, effort } = parseModelAndEffort(cs.model, cs.effort);
     const { taskTitle, rawTaskTitle } = buildChineseTaskTitle({ prompt: cs.firstUserPrompt });
     const promptTot = cs.uncachedInput + cs.cacheRead;
+    const ctxSnap = buildContextSnapshotFromSource(cs, { isCodex: true, fallbackLimit: windowLimit, nowMs });
     liveAgents.push({
       id: cs.id,
       shortId: cs.shortId,
+      targetKey: `codex-cli:${cs.id}`,
       kind: 'codex-cli',
       kindLabel: cs.isCliExec ? 'Codex CLI' : 'Codex',
       projectId: cs.projectId,
@@ -1630,6 +1766,12 @@ export function buildTelemetrySnapshot({
       effort,
       totalTokens: cs.totalTokens,
       cacheHitRate: promptTot > 0 ? Math.round((cs.cacheRead / promptTot) * 100) : 0,
+      contextUsed: ctxSnap.used,
+      contextLimit: ctxSnap.limit,
+      contextPercent: ctxSnap.percent,
+      lastTurnCacheHitRate: ctxSnap.lastTurnCache.hitRate,
+      isCacheDrop: ctxSnap.lastTurnCache.isDrop,
+      compactionCount: ctxSnap.compaction.count,
       lastActiveMs: cs.lastActiveMs,
       clickableConvId: '',
     });
@@ -1661,9 +1803,11 @@ export function buildTelemetrySnapshot({
       dbTitle: s?.explicitTitle || '',
       prompt: parsed.firstUserPrompt,
     });
+    const ctxSnap = buildContextSnapshotFromSource(parsed, { isCodex: false, fallbackLimit: windowLimit, nowMs });
     liveAgents.push({
       id: cid,
       shortId: cid.slice(0, 8),
+      targetKey: `agy-cli:${cid}`,
       kind: 'agy-cli',
       kindLabel: 'AGY CLI',
       projectId: proj.id,
@@ -1681,6 +1825,12 @@ export function buildTelemetrySnapshot({
       effort,
       totalTokens: totals.totalTokens,
       cacheHitRate: Math.round(totals.cacheHitRate),
+      contextUsed: ctxSnap.used,
+      contextLimit: ctxSnap.limit,
+      contextPercent: ctxSnap.percent,
+      lastTurnCacheHitRate: ctxSnap.lastTurnCache.hitRate,
+      isCacheDrop: ctxSnap.lastTurnCache.isDrop,
+      compactionCount: ctxSnap.compaction.count,
       lastActiveMs,
       clickableConvId: '',
     });
@@ -1719,9 +1869,11 @@ export function buildTelemetrySnapshot({
       role: desc?.role || '',
       prompt: parsed?.firstUserPrompt || '',
     });
+    const ctxSnap = buildContextSnapshotFromSource(parsed, { isCodex: false, fallbackLimit: windowLimit, nowMs });
     liveAgents.push({
       id: cid,
       shortId: cid.slice(0, 8),
+      targetKey: `gui-subagent:${cid}`,
       kind: 'gui-subagent',
       kindLabel,
       projectId: proj.id,
@@ -1743,6 +1895,12 @@ export function buildTelemetrySnapshot({
       effort,
       totalTokens: totals.totalTokens,
       cacheHitRate: Math.round(totals.cacheHitRate),
+      contextUsed: ctxSnap.used,
+      contextLimit: ctxSnap.limit,
+      contextPercent: ctxSnap.percent,
+      lastTurnCacheHitRate: ctxSnap.lastTurnCache.hitRate,
+      isCacheDrop: ctxSnap.lastTurnCache.isDrop,
+      compactionCount: ctxSnap.compaction.count,
       lastActiveMs,
       clickableConvId: cid,
     });
@@ -1753,6 +1911,100 @@ export function buildTelemetrySnapshot({
     if (rank(a) !== rank(b)) return rank(a) - rank(b);
     return b.lastActiveMs - a.lastActiveMs;
   });
+
+  // Resolve REAL-TIME CONTEXT WINDOW target (main conversation OR any active CLI / subagent!)
+  let contextSnapshot = null;
+  const reqTarget = String(contextTarget || 'main').trim();
+  if (reqTarget && reqTarget !== 'main') {
+    const colonIdx = reqTarget.indexOf(':');
+    const tKind = colonIdx > 0 ? reqTarget.slice(0, colonIdx) : '';
+    const tId = colonIdx > 0 ? reqTarget.slice(colonIdx + 1) : reqTarget;
+    const matchedAgent = liveAgents.find((a) => a.targetKey === reqTarget || a.id === tId);
+
+    if (tKind === 'codex-cli') {
+      const cs = codexSessions.find((c) => c.id === tId);
+      if (cs) {
+        const { taskTitle } = buildChineseTaskTitle({ prompt: cs.firstUserPrompt });
+        contextSnapshot = buildContextSnapshotFromSource(cs, {
+          isCodex: true,
+          fallbackLimit: windowLimit,
+          nowMs,
+          targetMeta: {
+            key: `codex-cli:${cs.id}`,
+            isMain: false,
+            kind: 'codex-cli',
+            kindLabel: cs.isCliExec ? 'Codex CLI' : 'Codex',
+            title: taskTitle || `Codex ${cs.shortId}`,
+            projectName: cs.projectName,
+          },
+        });
+      }
+    } else if (tKind === 'agy-cli') {
+      const parsed = parsedAgyCli.get(tId);
+      if (parsed) {
+        const s = summaryById.get(tId);
+        const proj = resolveProjectForConv(tId);
+        const { taskTitle } = buildChineseTaskTitle({
+          dbTitle: s?.explicitTitle || '',
+          prompt: parsed.firstUserPrompt,
+        });
+        contextSnapshot = buildContextSnapshotFromSource(parsed, {
+          isCodex: false,
+          fallbackLimit: windowLimit,
+          nowMs,
+          targetMeta: {
+            key: `agy-cli:${tId}`,
+            isMain: false,
+            kind: 'agy-cli',
+            kindLabel: 'AGY CLI',
+            title: taskTitle || matchedAgent?.taskTitle || `AGY CLI ${tId.slice(0, 8)}`,
+            projectName: proj?.name || matchedAgent?.projectName || '',
+          },
+        });
+      }
+    } else if (tKind === 'gui-subagent') {
+      const parsed = parsedDesktop.get(tId);
+      if (parsed) {
+        const s = summaryById.get(tId);
+        const desc = subDescriptors.get(tId);
+        const proj = resolveProjectForConv(tId, desc?.workspaceUris || []);
+        const { taskTitle } = buildChineseTaskTitle({
+          dbTitle: s?.explicitTitle || '',
+          role: desc?.role || '',
+          prompt: parsed.firstUserPrompt,
+        });
+        contextSnapshot = buildContextSnapshotFromSource(parsed, {
+          isCodex: false,
+          fallbackLimit: windowLimit,
+          nowMs,
+          targetMeta: {
+            key: `gui-subagent:${tId}`,
+            isMain: false,
+            kind: 'gui-subagent',
+            kindLabel: desc?.typeName ? `GUI 子智能体 · ${desc.typeName}` : 'GUI 子智能体',
+            title: taskTitle || matchedAgent?.taskTitle || `子智能体 ${tId.slice(0, 8)}`,
+            projectName: proj?.name || matchedAgent?.projectName || '',
+          },
+        });
+      }
+    }
+  }
+
+  if (!contextSnapshot) {
+    contextSnapshot = buildContextSnapshotFromSource(activeData, {
+      isCodex: false,
+      fallbackLimit: windowLimit,
+      nowMs,
+      targetMeta: {
+        key: 'main',
+        isMain: true,
+        kind: 'gui',
+        kindLabel: '主会话',
+        title: activeConvObj.title,
+        projectName: activeConvObj.projectName,
+      },
+    });
+  }
 
   // Conversations filtered to the active project (or all if no project selected)
   const visibleConversations = activeProject
@@ -1775,30 +2027,7 @@ export function buildTelemetrySnapshot({
       all: allProjectsStats,
     },
     quotas,
-    context: {
-      used: usedTokens,
-      limit,
-      percent: usedPercent,
-      remaining: remainingTokens,
-      lastTurnCache,
-      compaction,
-      breakdown: {
-        system: systemBase,
-        thinking: thinkingTokens,
-        dialog: dialogTokens,
-        tools: toolTokens,
-        remaining: remainingTokens,
-      },
-      speed: {
-        latest: latestSpeed,
-        average: avgSpeed,
-        sparkline: speedPoints,
-        model: parsedLastModel.baseModel,
-        effort: parsedLastModel.effort,
-        rawModel: activeData?.lastModel || latestModelTurn?.model || latestTurn?.model || '',
-        turnCount: nonCheckpointTurns.length,
-      },
-    },
+    context: contextSnapshot,
     activeAgents: {
       items: liveAgents.slice(0, 12),
       runningCount: liveAgents.filter((a) => a.isRunning).length,

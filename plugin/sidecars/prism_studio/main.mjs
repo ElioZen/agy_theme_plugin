@@ -254,6 +254,7 @@ app.api(
     const hostConversationId = String(data.hostConversationId || '');
     const activeWorkspaceUri = String(data.activeWorkspaceUri || '');
     const selectedProjectId = String(data.selectedProjectId || '');
+    const contextTarget = String(data.contextTarget || 'main');
     const showRecentAgents =
       data.showRecentAgents !== undefined
         ? data.showRecentAgents === 'true' || data.showRecentAgents === true
@@ -264,6 +265,7 @@ app.api(
       hostConversationId,
       activeWorkspaceUri,
       selectedProjectId,
+      contextTarget,
       followLatest,
       statsScope,
       sourceFilter,

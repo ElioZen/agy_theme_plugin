@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_VERSION = '3.5.4';
+  const FRONTEND_VERSION = '3.6.0';
   const COLOR_CHANNELS = [
     { key: 'accent', label: '主强调色' },
     { key: 'secondary', label: '次折射色' },
@@ -14,6 +14,7 @@
   let activeWorkspaceUri = '';
   let selectedProjectId = '';
   let manualConversationId = '';
+  let contextTargetKey = 'main';
   let currentPage = 'cockpit';
   let modelsExpanded = false;
   let overviewExpanded = false;
@@ -1089,6 +1090,49 @@
 
     // ========== WINDOW 3: STANDALONE REAL-TIME CONTEXT ==========
     const ctx = telemetry.context;
+    const ag = telemetry.activeAgents;
+    const ctxTarget = ctx.target || { key: 'main', isMain: true, kindLabel: '主会话', title: activeConv?.title || '当前会话' };
+    if (ctxTarget.isMain && contextTargetKey !== 'main') {
+      contextTargetKey = 'main';
+    }
+
+    const nativePill = $('#ctx-native-limit-pill');
+    const limitGroup = $('#window-limit-group');
+    if (ctx.isNativeLimit) {
+      nativePill.hidden = false;
+      nativePill.textContent = `${formatCompact(ctx.limit)} 原生`;
+      limitGroup.hidden = true;
+    } else {
+      nativePill.hidden = true;
+      limitGroup.hidden = false;
+    }
+
+    const ctxBar = $('#ctx-target-bar');
+    const ctxTargetSel = $('#select-context-target');
+    const backMainBtn = $('#btn-ctx-back-main');
+    const hasAgentTargets = (ag?.items || []).length > 0 || !ctxTarget.isMain;
+    ctxBar.hidden = !hasAgentTargets;
+    backMainBtn.hidden = ctxTarget.isMain;
+    if (hasAgentTargets) {
+      const opts = [
+        `<option value="main" ${ctxTarget.isMain ? 'selected' : ''}>主会话 · ${escapeHtml(activeConv?.title || '当前会话')}</option>`,
+        ...(ag.items || []).map((a) => {
+          const titleShort = a.taskTitle ? a.taskTitle.slice(0, 26) : a.shortId;
+          const pctTxt = typeof a.contextPercent === 'number' ? ` (${a.contextPercent.toFixed(0)}%)` : '';
+          const selected = !ctxTarget.isMain && ctxTarget.key === a.targetKey ? 'selected' : '';
+          return `<option value="${escapeHtml(a.targetKey)}" ${selected}>${escapeHtml(a.kindLabel)} · ${escapeHtml(titleShort)}${pctTxt}</option>`;
+        }),
+      ];
+      if (!ctxTarget.isMain && !(ag.items || []).some((a) => a.targetKey === ctxTarget.key)) {
+        opts.push(
+          `<option value="${escapeHtml(ctxTarget.key)}" selected>${escapeHtml(ctxTarget.kindLabel)} · ${escapeHtml(ctxTarget.title)}</option>`,
+        );
+      }
+      if (document.activeElement !== ctxTargetSel) {
+        setHtmlIfChanged(ctxTargetSel, opts.join(''));
+      }
+    }
+
     const circumference = 2 * Math.PI * 48;
     const offset = circumference * (1 - Math.min(100, ctx.percent) / 100);
     $('#ring-progress').style.strokeDashoffset = String(offset.toFixed(2));
@@ -1226,7 +1270,6 @@
     }
 
     // ========== WINDOW 4: ACTIVE CLI & SUBAGENT LIVE MONITOR ==========
-    const ag = telemetry.activeAgents;
     const badge = $('#active-agents-badge');
     const stalledCount = Number(ag.stalledCount || 0);
     if (stalledCount > 0 && ag.runningCount > 0) {
@@ -1265,6 +1308,7 @@
           .map((a) => {
             const isCodex = a.kind === 'codex-cli';
             const clickAttr = a.clickableConvId ? `data-jump-agent="${escapeHtml(a.clickableConvId)}"` : '';
+            const isWatched = !ctxTarget.isMain && ctxTarget.key === a.targetKey;
             const stateCls = a.isStalled ? 'is-stalled' : a.isRunning ? 'is-running' : '';
             const pillCls = a.isStalled ? 'warn' : a.isRunning ? 'running' : '';
             const statusSuffix = a.isStalled
@@ -1272,17 +1316,40 @@
               : a.isRunning
               ? '运行中'
               : formatRelativeTime(a.lastActiveMs);
+            const ctxPct = Number(a.contextPercent || 0);
+            const ctxLvl = ctxPct >= 90 ? 'danger' : ctxPct >= 75 ? 'warn' : '';
+            const hasCtx = Number(a.contextUsed || 0) > 0;
             return `
-              <div class="agent-card ${stateCls} ${a.clickableConvId ? 'clickable' : ''}" ${clickAttr}>
+              <div class="agent-card ${stateCls} ${isWatched ? 'is-watched' : ''} ${a.clickableConvId ? 'clickable' : ''}" ${clickAttr}>
                 <div class="agent-top">
                   <div class="agent-id-group">
                     <span class="source-tag ${isCodex ? 'codex' : ''}">${escapeHtml(a.kindLabel)}</span>
                     <span class="agent-action">${escapeHtml(a.activity)}</span>
                   </div>
-                  <span class="badge-pill ${pillCls}">${escapeHtml(a.projectName)} · ${statusSuffix}</span>
+                  <div class="agent-top-right">
+                    <button type="button" class="watch-ctx-btn ${isWatched ? 'active' : ''}" data-watch-target="${escapeHtml(a.targetKey)}" title="在实时上下文窗口中盯防此节点">${isWatched ? '盯防中' : '盯防'}</button>
+                    <span class="badge-pill ${pillCls}">${escapeHtml(a.projectName)} · ${statusSuffix}</span>
+                  </div>
                 </div>
                 ${a.taskTitle ? `<div class="agent-task-title" title="${escapeHtml(a.rawTaskTitle || a.taskTitle)}">${escapeHtml(a.taskTitle)}</div>` : ''}
                 ${a.actionDetail ? `<div class="agent-cmd-line" title="${escapeHtml(a.actionDetail)}">${escapeHtml(a.actionDetail)}</div>` : ''}
+                ${
+                  hasCtx
+                    ? `
+                  <div class="agent-ctx-strip tabular">
+                    <div class="agent-ctx-head">
+                      <span class="agent-ctx-tags">
+                        <span>上下文 ${formatCompact(a.contextUsed)} / ${formatCompact(a.contextLimit)}</span>
+                        ${a.isCacheDrop ? `<span class="agent-ctx-mini-warn">⚠ 掉缓存</span>` : ''}
+                        ${a.compactionCount > 0 ? `<span>· 已压 ${a.compactionCount} 次</span>` : ''}
+                      </span>
+                      <strong class="${ctxLvl}">${ctxPct.toFixed(1)}%</strong>
+                    </div>
+                    <div class="agent-ctx-bar"><span class="${ctxLvl}" style="width:${Math.max(2, Math.min(100, ctxPct))}%"></span></div>
+                  </div>
+                `
+                    : ''
+                }
                 <div class="agent-metrics-grid tabular">
                   <div class="agent-kv">
                     <span>当前模型</span>
@@ -1338,6 +1405,7 @@
       range: tel.range || 'today',
       windowLimit: String(tel.windowLimit || 512000),
       showRecentAgents: String(Boolean(tel.showRecentAgents)),
+      contextTarget: contextTargetKey || 'main',
     });
     if (hostConversationId) params.set('hostConversationId', hostConversationId);
     if (activeWorkspaceUri) params.set('activeWorkspaceUri', activeWorkspaceUri);
@@ -1543,12 +1611,23 @@
       }
     });
 
-    // Window 3: Context controls
+    // Window 3: Context controls & target switcher
     $('#window-limit-group').addEventListener('click', async (e) => {
       const btn = e.target.closest('.seg-btn');
       if (!btn) return;
       await queueSaveSettings({ telemetry: { windowLimit: Number(btn.dataset.limit) } }, true);
       await loadTelemetry();
+    });
+
+    $('#select-context-target').addEventListener('change', async (e) => {
+      contextTargetKey = e.target.value || 'main';
+      await loadTelemetry();
+    });
+
+    $('#btn-ctx-back-main').addEventListener('click', async () => {
+      contextTargetKey = 'main';
+      await loadTelemetry();
+      showToast('已切回主会话上下文');
     });
 
     // Window 4: Active CLI & Subagent controls
@@ -1567,6 +1646,20 @@
     });
 
     $('#agents-list').addEventListener('click', async (e) => {
+      const watchBtn = e.target.closest('[data-watch-target]');
+      if (watchBtn) {
+        e.stopPropagation();
+        const key = watchBtn.dataset.watchTarget || 'main';
+        contextTargetKey = contextTargetKey === key ? 'main' : key;
+        await loadTelemetry();
+        if (contextTargetKey !== 'main') {
+          $('#card-realtime-context')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          showToast('已切换实时上下文盯防该节点');
+        } else {
+          showToast('已切回主会话上下文');
+        }
+        return;
+      }
       const expBtn = e.target.closest('[data-toggle-expand="agents"]');
       if (expBtn) {
         agentsExpanded = !agentsExpanded;
