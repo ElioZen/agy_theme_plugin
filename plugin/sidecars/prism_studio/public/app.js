@@ -34,6 +34,13 @@
 
   const $ = (sel) => document.querySelector(sel);
 
+  function setHtmlIfChanged(el, html) {
+    if (!el || el._lastHtml === html) return false;
+    el._lastHtml = html;
+    el.innerHTML = html;
+    return true;
+  }
+
   function showToast(msg) {
     const el = $('#toast');
     if (!el) return;
@@ -585,7 +592,7 @@
   function renderSparkline(points) {
     const svg = $('#speed-sparkline');
     if (!points || points.length < 2) {
-      svg.innerHTML = `<text x="60" y="18" text-anchor="middle" fill="var(--prism-muted)" font-size="9">待采样</text>`;
+      setHtmlIfChanged(svg, `<text x="60" y="18" text-anchor="middle" fill="var(--prism-muted)" font-size="9">待采样</text>`);
       return;
     }
     const vals = points.map((p) => p.rate);
@@ -606,7 +613,9 @@
     const areaD = `${lineD} L${coords[coords.length - 1][0].toFixed(1)},${h} L${coords[0][0].toFixed(1)},${h} Z`;
     const last = coords[coords.length - 1];
 
-    svg.innerHTML = `
+    setHtmlIfChanged(
+      svg,
+      `
       <defs>
         <linearGradient id="sparkFill" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stop-color="var(--prism-tertiary)" stop-opacity="0.45"/>
@@ -616,7 +625,8 @@
       <path d="${areaD}" fill="url(#sparkFill)" />
       <path d="${lineD}" fill="none" stroke="var(--prism-tertiary)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
       <circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="2.4" fill="var(--prism-tertiary)" />
-    `;
+    `,
+    );
   }
 
   function renderCockpit() {
@@ -628,7 +638,7 @@
 
     const projSel = $('#select-project');
     const projects = telemetry.projects || [];
-    projSel.innerHTML = projects.length
+    const projHtml = projects.length
       ? projects
           .map(
             (p) =>
@@ -636,10 +646,11 @@
           )
           .join('')
       : `<option value="">暂无项目</option>`;
+    if (document.activeElement !== projSel) setHtmlIfChanged(projSel, projHtml);
 
     const convSel = $('#select-conversation');
     const convs = telemetry.conversations || [];
-    convSel.innerHTML = convs.length
+    const convHtml = convs.length
       ? convs
           .map(
             (c) =>
@@ -647,6 +658,7 @@
           )
           .join('')
       : `<option value="">该项目暂无会话</option>`;
+    if (document.activeElement !== convSel) setHtmlIfChanged(convSel, convHtml);
 
     const statusPill = $('#active-status-pill');
     statusPill.textContent = activeConv?.statusLabel || '就绪';
@@ -768,7 +780,7 @@
     if (statsLevel === 'overview') {
       const ovPanel = $('#stats-overview-panel');
       if (!overviewGroups.length) {
-        ovPanel.innerHTML = `<div class="model-row"><div class="card-sub">当前筛选条件下暂无 Token 记录</div></div>`;
+        setHtmlIfChanged(ovPanel, `<div class="model-row"><div class="card-sub">当前筛选条件下暂无 Token 记录</div></div>`);
       } else {
         const visibleGroups = overviewExpanded ? overviewGroups : overviewGroups.slice(0, MAX_COLLAPSED_MODELS);
         const hiddenCount = Math.max(0, overviewGroups.length - MAX_COLLAPSED_MODELS);
@@ -847,7 +859,9 @@
               : formatCompact(lastOverviewTotals.tokens);
           const centerSub = `${overviewGroups.length} 个模型`;
 
-          ovPanel.innerHTML = `
+          setHtmlIfChanged(
+            ovPanel,
+            `
             <div class="overview-donut-layout">
               <div class="donut-wrap">
                 <svg class="overview-donut-svg" id="overview-donut-svg" viewBox="0 0 124 124">
@@ -864,14 +878,18 @@
               </div>
             </div>
             ${expandBtnHtml}
-          `;
+          `,
+          );
         } else {
-          ovPanel.innerHTML = `
+          setHtmlIfChanged(
+            ovPanel,
+            `
             <div class="overview-legend-list">
               ${visibleGroups.map((g) => renderOverviewItem(g, true)).join('')}
             </div>
             ${expandBtnHtml}
-          `;
+          `,
+          );
         }
       }
     }
@@ -880,15 +898,19 @@
     const detailModels = isDrilled ? models.filter((m) => m.displayName === drilledModel) : models;
     if (detailModels.length) {
       const detailGrand = Math.max(1, detailModels.reduce((s, x) => s + Number(x.totalTokens || 0), 0));
-      $('#stats-ratio-bar').innerHTML = detailModels
-        .map((m) => {
-          const pct = isDrilled ? (m.totalTokens / detailGrand) * 100 : m.sharePercent;
-          return `<span style="width:${Math.max(2, pct)}%;background:${m.color}" title="${escapeHtml(m.displayName)} (${m.sourceLabel}) ${pct.toFixed(1)}%"></span>`;
-        })
-        .join('');
+      setHtmlIfChanged(
+        $('#stats-ratio-bar'),
+        detailModels
+          .map((m) => {
+            const pct = isDrilled ? (m.totalTokens / detailGrand) * 100 : m.sharePercent;
+            return `<span style="width:${Math.max(2, pct)}%;background:${m.color}" title="${escapeHtml(m.displayName)} (${m.sourceLabel}) ${pct.toFixed(1)}%"></span>`;
+          })
+          .join(''),
+      );
       const visibleModels = modelsExpanded || isDrilled ? detailModels : detailModels.slice(0, MAX_COLLAPSED_MODELS);
       const hiddenModelsCount = isDrilled ? 0 : Math.max(0, detailModels.length - MAX_COLLAPSED_MODELS);
-      $('#stats-models-list').innerHTML =
+      setHtmlIfChanged(
+        $('#stats-models-list'),
         visibleModels
           .map((m) => {
             const tot = Math.max(1, m.totalTokens);
@@ -919,34 +941,38 @@
             `;
           })
           .join('') +
-        (hiddenModelsCount > 0
-          ? `<button type="button" class="expand-list-btn" data-toggle-expand="models">${
-              modelsExpanded ? '收起模型明细 ▴' : `展开其余 ${hiddenModelsCount} 项模型（共 ${detailModels.length} 项）▾`
-            }</button>`
-          : '');
+          (hiddenModelsCount > 0
+            ? `<button type="button" class="expand-list-btn" data-toggle-expand="models">${
+                modelsExpanded ? '收起模型明细 ▴' : `展开其余 ${hiddenModelsCount} 项模型（共 ${detailModels.length} 项）▾`
+              }</button>`
+            : ''),
+      );
     } else {
-      $('#stats-ratio-bar').innerHTML = '';
-      $('#stats-models-list').innerHTML = `<div class="model-row"><div class="card-sub">当前筛选条件下暂无 Token 记录</div></div>`;
+      setHtmlIfChanged($('#stats-ratio-bar'), '');
+      setHtmlIfChanged($('#stats-models-list'), `<div class="model-row"><div class="card-sub">当前筛选条件下暂无 Token 记录</div></div>`);
     }
 
     // ALWAYS-VISIBLE Quick Project Switcher Strip inside Window 1
     const switchStrip = $('#projects-switch-strip');
     if (projects.length > 0) {
       switchStrip.hidden = false;
-      switchStrip.innerHTML = projects
-        .map((p) => {
-          const isSelected = p.id === telemetry.activeProjectId && scope !== 'all';
-          return `
-            <div class="proj-mini-chip ${isSelected ? 'active' : ''}" data-pick-project-id="${escapeHtml(p.id)}">
-              <div class="proj-mini-name">
-                <span>${escapeHtml(p.name)}</span>
-                ${isSelected ? `<span class="badge-pill running" style="padding:1px 5px;font-size:9.5px">当前</span>` : ''}
+      setHtmlIfChanged(
+        switchStrip,
+        projects
+          .map((p) => {
+            const isSelected = p.id === telemetry.activeProjectId && scope !== 'all';
+            return `
+              <div class="proj-mini-chip ${isSelected ? 'active' : ''}" data-pick-project-id="${escapeHtml(p.id)}">
+                <div class="proj-mini-name">
+                  <span>${escapeHtml(p.name)}</span>
+                  ${isSelected ? `<span class="badge-pill running" style="padding:1px 5px;font-size:9.5px">当前</span>` : ''}
+                </div>
+                <div class="proj-mini-val tabular">${formatCompact(p.totalTokens)} · 缓存 ${p.cacheHitRate.toFixed(0)}%</div>
               </div>
-              <div class="proj-mini-val tabular">${formatCompact(p.totalTokens)} · 缓存 ${p.cacheHitRate.toFixed(0)}%</div>
-            </div>
-          `;
-        })
-        .join('');
+            `;
+          })
+          .join(''),
+      );
     } else {
       switchStrip.hidden = true;
     }
@@ -1059,7 +1085,7 @@
     };
 
     const codexBoxHtml = oq.codex?.available ? renderQuotaBox(oq.codex, { wide: true }) : '';
-    $('#quota-grid').innerHTML = renderQuotaBox(oq.gemini) + renderQuotaBox(oq.claude) + codexBoxHtml;
+    setHtmlIfChanged($('#quota-grid'), renderQuotaBox(oq.gemini) + renderQuotaBox(oq.claude) + codexBoxHtml);
 
     // ========== WINDOW 3: STANDALONE REAL-TIME CONTEXT ==========
     const ctx = telemetry.context;
@@ -1097,21 +1123,24 @@
       { label: '工具与输出', value: b.tools, color: '#C084FC' },
     ];
     const usedBase = Math.max(1, ctx.used || items.reduce((s, it) => s + Number(it.value || 0), 0));
-    $('#breakdown-list').innerHTML = items
-      .map((it) => {
-        const shareUsed = ctx.used > 0 ? Math.min(100, (it.value / usedBase) * 100) : 0;
-        const shareLimit = ctx.limit > 0 ? Math.min(100, (it.value / ctx.limit) * 100) : 0;
-        return `
-          <div class="breakdown-item" title="${it.label}：占当前上下文 ${shareUsed.toFixed(1)}% · 占窗口上限 ${shareLimit.toFixed(1)}%">
-            <div class="breakdown-top">
-              <span>${it.label}</span>
-              <strong class="tabular">${formatCompact(it.value)} <span class="muted">${shareUsed.toFixed(1)}%</span></strong>
+    setHtmlIfChanged(
+      $('#breakdown-list'),
+      items
+        .map((it) => {
+          const shareUsed = ctx.used > 0 ? Math.min(100, (it.value / usedBase) * 100) : 0;
+          const shareLimit = ctx.limit > 0 ? Math.min(100, (it.value / ctx.limit) * 100) : 0;
+          return `
+            <div class="breakdown-item" title="${it.label}：占当前上下文 ${shareUsed.toFixed(1)}% · 占窗口上限 ${shareLimit.toFixed(1)}%">
+              <div class="breakdown-top">
+                <span>${it.label}</span>
+                <strong class="tabular">${formatCompact(it.value)} <span class="muted">${shareUsed.toFixed(1)}%</span></strong>
+              </div>
+              <div class="breakdown-bar"><span style="width:${Math.max(shareUsed, it.value > 0 ? 4 : 0)}%;background:${it.color}"></span></div>
             </div>
-            <div class="breakdown-bar"><span style="width:${Math.max(shareUsed, it.value > 0 ? 4 : 0)}%;background:${it.color}"></span></div>
-          </div>
-        `;
-      })
-      .join('');
+          `;
+        })
+        .join(''),
+    );
 
     const spd = ctx.speed;
     $('#ctx-model-badge').textContent = spd.model || '—';
@@ -1219,15 +1248,19 @@
 
     const listEl = $('#agents-list');
     if (!ag.items.length) {
-      listEl.innerHTML = `
+      setHtmlIfChanged(
+        listEl,
+        `
         <div class="empty-agents">
           当前暂无运行中的 CLI 或子智能体${ag.recentHiddenCount > 0 ? `（可点右上角查看近期 1h 的 ${ag.recentHiddenCount} 个记录）` : ''}
         </div>
-      `;
+      `,
+      );
     } else {
       const visibleAgents = agentsExpanded ? ag.items : ag.items.slice(0, MAX_COLLAPSED_AGENTS);
       const hiddenAgentsCount = Math.max(0, ag.items.length - MAX_COLLAPSED_AGENTS);
-      listEl.innerHTML =
+      setHtmlIfChanged(
+        listEl,
         visibleAgents
           .map((a) => {
             const isCodex = a.kind === 'codex-cli';
@@ -1268,11 +1301,12 @@
             `;
           })
           .join('') +
-        (hiddenAgentsCount > 0
-          ? `<button type="button" class="expand-list-btn" data-toggle-expand="agents">${
-              agentsExpanded ? '收起列表 ▴' : `展开其余 ${hiddenAgentsCount} 项（共 ${ag.items.length} 项）▾`
-            }</button>`
-          : '');
+          (hiddenAgentsCount > 0
+            ? `<button type="button" class="expand-list-btn" data-toggle-expand="agents">${
+                agentsExpanded ? '收起列表 ▴' : `展开其余 ${hiddenAgentsCount} 项（共 ${ag.items.length} 项）▾`
+              }</button>`
+            : ''),
+      );
     }
   }
 

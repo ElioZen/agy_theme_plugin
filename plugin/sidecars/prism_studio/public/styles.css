@@ -88,6 +88,11 @@ body.companion-seamless .wallpaper-layer,
 body.companion-seamless .scrim-layer {
   opacity: 0 !important;
 }
+body.companion-seamless .glass-surface,
+body.companion-seamless .glass-card {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
 body.companion-seamless .glass-card {
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.045) 0%, rgba(255, 255, 255, 0.01) 100%),
@@ -181,6 +186,9 @@ body.companion-seamless .glass-card {
   flex: 1;
   overflow-y: auto;
   padding: 10px 11px 18px;
+  isolation: isolate;
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
 }
 
 .main-scroll::-webkit-scrollbar { width: 5px; }
@@ -208,6 +216,9 @@ body.companion-seamless .glass-card {
   -webkit-backdrop-filter: blur(var(--prism-blur)) saturate(1.28);
   border: 1px solid var(--prism-border);
   box-shadow: inset 0 1px 0 var(--prism-specular);
+  contain: layout style;
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
   transition: border-color 0.18s ease, border-radius 0.18s ease;
 }
 
@@ -732,6 +743,7 @@ body.theme-light .seg-group { background: rgba(15, 23, 42, 0.06); }
   width: 118px;
   height: 118px;
   display: block;
+  overflow: visible;
 }
 .donut-track {
   fill: none;
@@ -742,12 +754,11 @@ body.theme-light .seg-group { background: rgba(15, 23, 42, 0.06); }
   fill: none;
   stroke-width: 12;
   cursor: pointer;
-  transition: stroke-width 0.16s ease, opacity 0.16s ease, filter 0.16s ease;
+  transition: stroke-width 0.16s ease, opacity 0.16s ease;
 }
 .donut-slice:hover,
 .donut-slice.is-hovered {
-  stroke-width: 15;
-  filter: drop-shadow(0 0 6px currentColor);
+  stroke-width: 14.5;
 }
 .overview-donut-svg.has-hover .donut-slice:not(.is-hovered) {
   opacity: 0.42;
