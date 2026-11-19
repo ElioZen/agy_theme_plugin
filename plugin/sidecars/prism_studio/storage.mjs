@@ -155,14 +155,10 @@ export const DEFAULT_SETTINGS = {
   telemetry: {
     followLatest: true,
     windowLimit: 512000,
+    statsScope: 'project', // 'project' | 'session' | 'all'
     range: 'today',
-    subagentScope: 'all', // 'all' | 'current'
-  },
-  quotaBudgets: {
-    gemini5h: 60_000_000,
-    gemini7d: 500_000_000,
-    claude5h: 15_000_000,
-    claude7d: 120_000_000,
+    includeCliInProject: true,
+    showRecentAgents: false,
   },
   pinnedConversations: [],
 };

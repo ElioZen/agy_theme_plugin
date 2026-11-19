@@ -1,33 +1,73 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { resolveAppDataDir } from './storage.mjs';
 
 const MODEL_PRICING = [
-  { match: /gemini-4-neon/i, input: 1.5, cacheRead: 0.15, output: 6.0, family: 'gemini' },
-  { match: /gemini-4-hydrogen/i, input: 1.25, cacheRead: 0.125, output: 5.0, family: 'gemini' },
-  { match: /gemini-4-argon/i, input: 0.6, cacheRead: 0.06, output: 2.5, family: 'gemini' },
-  { match: /gemini-4-carbon/i, input: 0.35, cacheRead: 0.035, output: 1.5, family: 'gemini' },
-  { match: /gemini/i, input: 0.35, cacheRead: 0.035, output: 1.5, family: 'gemini' },
-  { match: /claude.*opus/i, input: 15.0, cacheRead: 1.5, output: 75.0, family: 'claude' },
-  { match: /claude.*sonnet/i, input: 3.0, cacheRead: 0.3, output: 15.0, family: 'claude' },
-  { match: /claude/i, input: 3.0, cacheRead: 0.3, output: 15.0, family: 'claude' },
-  { match: /gpt|o1|o3|o4/i, input: 2.5, cacheRead: 0.25, output: 10.0, family: 'claude' },
+  { match: /gemini-4-neon/i, input: 1.5, cacheRead: 0.15, output: 6.0 },
+  { match: /gemini-4-hydrogen/i, input: 1.25, cacheRead: 0.125, output: 5.0 },
+  { match: /gemini-4-argon/i, input: 0.6, cacheRead: 0.06, output: 2.5 },
+  { match: /gemini-4-carbon/i, input: 0.35, cacheRead: 0.035, output: 1.5 },
+  { match: /gemini/i, input: 0.35, cacheRead: 0.035, output: 1.5 },
+  { match: /claude.*opus/i, input: 15.0, cacheRead: 1.5, output: 75.0 },
+  { match: /claude.*sonnet/i, input: 3.0, cacheRead: 0.3, output: 15.0 },
+  { match: /claude/i, input: 3.0, cacheRead: 0.3, output: 15.0 },
+  { match: /gpt|codex|astra|o1|o3|o4/i, input: 2.5, cacheRead: 0.25, output: 10.0 },
 ];
 
-const MODEL_PALETTE = ['#6EA8FF', '#F4B860', '#38D9A9', '#C084FC', '#F472B6', '#38BDF8'];
+const MODEL_PALETTE = ['#6EA8FF', '#F4B860', '#38D9A9', '#C084FC', '#F472B6', '#38BDF8', '#A3E635'];
 
-export function classifyModelFamily(modelId) {
-  const s = String(modelId || '').toLowerCase();
-  if (s.includes('claude') || s.includes('gpt')) return 'claude';
-  if (s.includes('gemini') || s.includes('model_placeholder')) return 'gemini';
-  return 'gemini';
+const TOOL_ACTION_LABELS = {
+  run_command: '执行命令',
+  exec_command: '执行命令',
+  shell_command: '执行命令',
+  edit_file: '修改代码',
+  write_file: '写入文件',
+  apply_patch: '应用补丁',
+  read_file: '读取文件',
+  search_web: '检索网页',
+  invoke_subagent: '调度子智能体',
+  manage_task: '检查后台任务',
+};
+
+export function parseModelAndEffort(rawModel, explicitEffort = '') {
+  const m = String(rawModel || '').trim();
+  if (!m) return { baseModel: '未知模型', effort: explicitEffort || '—' };
+
+  let effort = String(explicitEffort || '').trim().toLowerCase();
+  let base = m;
+
+  if (/^MODEL_PLACEHOLDER_/i.test(m)) {
+    return { baseModel: `Gemini (${m.replace(/^MODEL_PLACEHOLDER_/, '')})`, effort: effort || '—' };
+  }
+
+  const suffixMatch = /-(xhigh|high|medium|low|max|thinking)$/i.exec(base);
+  if (suffixMatch) {
+    if (!effort) effort = suffixMatch[1].toLowerCase();
+    base = base.slice(0, -suffixMatch[0].length);
+  }
+  base = base.replace(/-tiered$/i, '');
+
+  const effortMap = {
+    xhigh: 'XHigh',
+    high: 'High',
+    medium: 'Medium',
+    low: 'Low',
+    max: 'Max',
+    thinking: 'Thinking',
+  };
+
+  return {
+    baseModel: base,
+    effort: effortMap[effort] || (effort ? effort.toUpperCase() : '—'),
+  };
 }
 
 export function formatModelName(modelId) {
   if (!modelId) return '未知模型';
   if (/^MODEL_PLACEHOLDER_/i.test(modelId)) {
-    return `Gemini 实验版 (${modelId.replace(/^MODEL_PLACEHOLDER_/, '')})`;
+    return `Gemini (${modelId.replace(/^MODEL_PLACEHOLDER_/, '')})`;
   }
   return modelId;
 }
@@ -45,44 +85,97 @@ export function estimateCostUsd(modelId, uncachedInput, cacheRead, output) {
   );
 }
 
-export function localizeStatus(status, notFullyIdle, killed = false) {
-  if (killed) return { code: 'killed', label: '已结束' };
-  if (notFullyIdle || status === 'CASCADE_RUN_STATUS_RUNNING') {
-    return { code: 'running', label: '运行中' };
-  }
-  if (status === 'CASCADE_RUN_STATUS_ERROR') {
-    return { code: 'error', label: '异常' };
-  }
-  return { code: 'idle', label: '空闲' };
-}
-
-function parseWorkspaceInfo(workspaceUrisRaw) {
+function normalizePathFromUri(uriOrPath) {
+  const s = String(uriOrPath || '').trim();
+  if (!s) return '';
   try {
-    const arr = Array.isArray(workspaceUrisRaw) ? workspaceUrisRaw : JSON.parse(workspaceUrisRaw || '[]');
-    if (Array.isArray(arr) && arr.length > 0) {
-      const uri = String(arr[0]);
-      const clean = uri.replace(/^file:\/\//, '').replace(/\/+$/, '');
-      return {
-        uri,
-        name: basename(decodeURIComponent(clean)) || '工作区',
-      };
-    }
+    return decodeURIComponent(s.replace(/^file:\/\//, '')).replace(/\/+$/, '');
   } catch {
-    // ignore
+    return s.replace(/^file:\/\//, '').replace(/\/+$/, '');
   }
-  return { uri: '', name: '全局' };
 }
 
 function parseTimestampMs(raw) {
   if (!raw) return 0;
+  if (typeof raw === 'number') return raw;
   const str = String(raw).trim().replace(' ', 'T');
   const ms = Date.parse(str);
   return Number.isFinite(ms) ? ms : 0;
 }
 
+/**
+ * Load ONLY the real user Projects shown in Antigravity's left sidebar:
+ * ~/.gemini/config/projects/*.json (excluding internal sidecars & empty default-cli-project).
+ */
+export function loadConfiguredProjects() {
+  const dir = join(homedir(), '.gemini', 'config', 'projects');
+  if (!existsSync(dir)) return [];
+
+  const projects = [];
+  let files = [];
+  try {
+    files = readdirSync(dir).filter((f) => f.endsWith('.json'));
+  } catch {
+    return [];
+  }
+
+  for (const f of files) {
+    try {
+      const raw = JSON.parse(readFileSync(join(dir, f), 'utf-8'));
+      if (!raw || raw.sidecar || raw.id === 'default-cli-project') continue;
+      const resources = raw.projectResources?.resources || [];
+      const folders = [];
+      for (const r of resources) {
+        const uri = r?.gitFolder?.folderUri || r?.folder?.folderUri || r?.folderUri || '';
+        const norm = normalizePathFromUri(uri);
+        if (norm) folders.push(norm);
+      }
+      if (!folders.length && raw.isWorkspaceOnly) continue;
+      if (!folders.length) continue;
+
+      projects.push({
+        id: String(raw.id || f.replace(/\.json$/, '')),
+        name: String(raw.name || basename(folders[0]) || '未命名项目'),
+        folders,
+      });
+    } catch {
+      // ignore invalid JSON
+    }
+  }
+
+  return projects.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function matchProjectByPathOrId(projects, { projectId = '', paths = [] } = {}) {
+  if (projectId) {
+    const byId = projects.find((p) => p.id === projectId);
+    if (byId) return byId;
+  }
+  for (const rawP of paths) {
+    const p = normalizePathFromUri(rawP);
+    if (!p) continue;
+    for (const proj of projects) {
+      for (const folder of proj.folders) {
+        if (p === folder || p.startsWith(`${folder}/`)) {
+          return proj;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+// ==================== TRANSCRIPT PARSER (AGY Desktop + AGY CLI) ====================
 const transcriptCache = new Map();
 
-function parseTranscriptFile(filePath) {
+function describeToolAction(toolName) {
+  if (!toolName) return '执行工具';
+  const base = String(toolName).replace(/^default_api:/, '');
+  const label = TOOL_ACTION_LABELS[base];
+  return label ? `${label} (${base})` : `执行 ${base}`;
+}
+
+function parseAgyTranscript(filePath) {
   let stat;
   try {
     stat = statSync(filePath);
@@ -91,9 +184,7 @@ function parseTranscriptFile(filePath) {
   }
   const cacheKey = `${stat.mtimeMs}:${stat.size}`;
   const cached = transcriptCache.get(filePath);
-  if (cached && cached.cacheKey === cacheKey) {
-    return cached.data;
-  }
+  if (cached && cached.cacheKey === cacheKey) return cached.data;
 
   let text = '';
   try {
@@ -111,9 +202,7 @@ function parseTranscriptFile(filePath) {
   let lastStepAt = 0;
   let prevStepMs = 0;
   let totalSteps = 0;
-  let lastStepType = '';
-  let lastStepStatus = '';
-  let firstPromptPreview = '';
+  let lastObj = null;
 
   for (const line of text.split('\n')) {
     if (!line.trim()) continue;
@@ -125,43 +214,28 @@ function parseTranscriptFile(filePath) {
     }
 
     totalSteps += 1;
+    lastObj = obj;
     const ts = parseTimestampMs(obj.created_at);
     if (ts > lastStepAt) lastStepAt = ts;
-    lastStepType = String(obj.type || '');
-    lastStepStatus = String(obj.status || '');
 
     if (obj.type === 'USER_INPUT') {
-      const c = String(obj.content || '');
-      userChars += c.length;
-      if (!firstPromptPreview && c.trim()) {
-        firstPromptPreview = c
-          .replace(/<\/?USER_REQUEST>/gi, '')
-          .replace(/\s+/g, ' ')
-          .trim()
-          .slice(0, 56);
-      }
+      userChars += String(obj.content || '').length;
     } else if (obj.type === 'PLANNER_RESPONSE') {
       const model = String(obj.model || '');
       if (model) lastModel = model;
       const inTok = Number(obj.input_tokens || 0);
       const cacheTok = Number(obj.cache_read_tokens || 0);
       const outTok = Number(obj.output_tokens || 0);
-      const thinkLen = String(obj.thinking || '').length;
-      const contentLen = String(obj.content || '').length;
-      const toolLen = Array.isArray(obj.tool_calls) ? JSON.stringify(obj.tool_calls).length : 0;
-
-      thinkingChars += thinkLen;
-      assistantChars += contentLen;
-      toolChars += toolLen;
+      thinkingChars += String(obj.thinking || '').length;
+      assistantChars += String(obj.content || '').length;
+      toolChars += Array.isArray(obj.tool_calls) ? JSON.stringify(obj.tool_calls).length : 0;
 
       let tokPerSec = null;
       if (prevStepMs > 0 && ts > prevStepMs && outTok >= 15) {
         const deltaSec = (ts - prevStepMs) / 1000;
         if (deltaSec >= 0.8 && deltaSec <= 240) {
           const rate = outTok / deltaSec;
-          if (rate > 0.5 && rate < 450) {
-            tokPerSec = Math.round(rate * 10) / 10;
-          }
+          if (rate > 0.5 && rate < 450) tokPerSec = Math.round(rate * 10) / 10;
         }
       }
 
@@ -184,15 +258,43 @@ function parseTranscriptFile(filePath) {
     if (ts > 0) prevStepMs = ts;
   }
 
+  // Infer exact live activity from last transcript step
+  let activity = '空闲';
+  let activityKind = 'idle';
+  if (lastObj) {
+    const tools = Array.isArray(lastObj.tool_calls) ? lastObj.tool_calls : [];
+    const lastToolName = tools.length > 0 ? tools[tools.length - 1]?.name || tools[tools.length - 1]?.tool_name || '' : '';
+    const notDone = lastObj.status && lastObj.status !== 'DONE' && lastObj.status !== 'ERROR';
+
+    if (lastObj.type === 'PLANNER_RESPONSE') {
+      if (tools.length > 0) {
+        activity = describeToolAction(lastToolName);
+        activityKind = 'tool';
+      } else if (notDone || (lastObj.thinking && !lastObj.content)) {
+        activity = '正在思考 (Thinking)';
+        activityKind = 'thinking';
+      } else {
+        activity = '生成回复中';
+        activityKind = 'responding';
+      }
+    } else if (lastObj.type === 'USER_INPUT') {
+      activity = '正在思考 (Thinking)';
+      activityKind = 'thinking';
+    } else {
+      activity = notDone ? '执行工具中' : '等待下一步思考';
+      activityKind = notDone ? 'tool' : 'thinking';
+    }
+  }
+
   const data = {
     turns,
     totalSteps,
     lastModel,
     lastStepAt,
     mtimeMs: stat.mtimeMs,
-    lastStepType,
-    lastStepStatus,
-    firstPromptPreview,
+    activity,
+    activityKind,
+    lastStatus: String(lastObj?.status || ''),
     charWeights: {
       user: userChars,
       assistant: assistantChars,
@@ -205,20 +307,181 @@ function parseTranscriptFile(filePath) {
   return data;
 }
 
-function readDbMetadata(appDataDir) {
-  const dbPath = join(appDataDir, 'conversation_summaries.db');
+// ==================== CODEX CLI SESSION PARSER (~/.codex/sessions) ====================
+const codexCache = new Map();
+
+function listRecentCodexFiles(maxAgeMs = 7 * 24 * 60 * 60 * 1000) {
+  const root = join(homedir(), '.codex', 'sessions');
+  if (!existsSync(root)) return [];
+  const cutoff = Date.now() - maxAgeMs;
+  const results = [];
+
+  function walk(dir, depth) {
+    if (depth > 4) return;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const ent of entries) {
+      const full = join(dir, ent.name);
+      if (ent.isDirectory()) {
+        walk(full, depth + 1);
+      } else if (ent.isFile() && ent.name.endsWith('.jsonl')) {
+        try {
+          const st = statSync(full);
+          if (st.mtimeMs >= cutoff) {
+            results.push({ path: full, mtimeMs: st.mtimeMs, size: st.size });
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
+  walk(root, 0);
+  results.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return results.slice(0, 40);
+}
+
+function parseCodexSession(filePath, statInfo) {
+  const cacheKey = `${statInfo.mtimeMs}:${statInfo.size}`;
+  const cached = codexCache.get(filePath);
+  if (cached && cached.cacheKey === cacheKey) return cached.data;
+
+  let text = '';
+  try {
+    // Only parse reasonably sized files fully; for giant multi-day files read head + tail
+    if (statInfo.size > 16 * 1024 * 1024) {
+      const buf = readFileSync(filePath);
+      const head = buf.subarray(0, 64 * 1024).toString('utf-8');
+      const tail = buf.subarray(Math.max(0, buf.length - 512 * 1024)).toString('utf-8');
+      text = `${head}\n${tail.slice(tail.indexOf('\n') + 1)}`;
+    } else {
+      text = readFileSync(filePath, 'utf-8');
+    }
+  } catch {
+    return null;
+  }
+
+  let sessionId = basename(filePath, '.jsonl');
+  let cwd = '';
+  let originator = '';
+  let source = '';
+  let model = '';
+  let effort = '';
+  let totalTokens = 0;
+  let inputTokens = 0;
+  let cachedTokens = 0;
+  let outputTokens = 0;
+  let reasoningTokens = 0;
+  let lastEventTs = 0;
+  let isCompleted = false;
+  let activity = '运行中';
+  let activityKind = 'thinking';
+  let turnCount = 0;
+
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    let obj;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    const ts = parseTimestampMs(obj.timestamp);
+    if (ts > lastEventTs) lastEventTs = ts;
+    const p = obj.payload || {};
+
+    if (obj.type === 'session_meta') {
+      if (p.id || p.session_id) sessionId = String(p.id || p.session_id);
+      if (p.cwd) cwd = String(p.cwd);
+      if (p.originator) originator = String(p.originator);
+      if (p.source) source = String(p.source);
+    } else if (obj.type === 'turn_context') {
+      if (p.model) model = String(p.model);
+      if (p.effort || p.reasoning_effort) effort = String(p.effort || p.reasoning_effort);
+      if (p.cwd && !cwd) cwd = String(p.cwd);
+      turnCount += 1;
+    } else if (obj.type === 'event_msg') {
+      if (p.type === 'thread_settings_applied') {
+        if (p.thread_settings?.model) model = String(p.thread_settings.model);
+        if (p.thread_settings?.reasoning_effort) effort = String(p.thread_settings.reasoning_effort);
+      } else if (p.type === 'token_count' && p.info?.total_token_usage) {
+        const u = p.info.total_token_usage;
+        inputTokens = Number(u.input_tokens || 0);
+        cachedTokens = Number(u.cached_input_tokens || 0);
+        outputTokens = Number(u.output_tokens || 0);
+        reasoningTokens = Number(u.reasoning_output_tokens || 0);
+        totalTokens = Number(u.total_tokens || inputTokens + outputTokens);
+      } else if (p.type === 'task_started') {
+        isCompleted = false;
+        activity = '正在思考 (Thinking)';
+        activityKind = 'thinking';
+      } else if (p.type === 'task_complete' || p.type === 'turn_aborted') {
+        isCompleted = true;
+        activity = p.type === 'turn_aborted' ? '已中止' : '本轮已完成';
+        activityKind = 'idle';
+      }
+    } else if (obj.type === 'response_item') {
+      isCompleted = false;
+      if (p.type === 'reasoning') {
+        activity = '正在思考 (Thinking)';
+        activityKind = 'thinking';
+      } else if (p.type === 'custom_tool_call' || p.type === 'function_call') {
+        activity = describeToolAction(p.name || 'tool');
+        activityKind = 'tool';
+      } else if (p.type === 'custom_tool_call_output' || p.type === 'function_call_output') {
+        activity = '工具返回 · 继续思考';
+        activityKind = 'thinking';
+      } else if (p.type === 'message') {
+        activity = p.status === 'completed' ? '输出回复' : '生成回复中';
+        activityKind = 'responding';
+      }
+    }
+  }
+
+  const uncachedInput = Math.max(0, inputTokens - cachedTokens);
+  const data = {
+    id: sessionId,
+    shortId: sessionId.slice(-8),
+    filePath,
+    cwd,
+    originator,
+    source,
+    isCliExec: originator === 'codex_exec' || source === 'exec' || originator.toLowerCase().includes('cli'),
+    model: model || 'codex',
+    effort,
+    totalTokens,
+    uncachedInput,
+    cacheRead: cachedTokens,
+    output: outputTokens,
+    reasoningTokens,
+    turnCount,
+    lastActiveMs: Math.max(lastEventTs, statInfo.mtimeMs),
+    mtimeMs: statInfo.mtimeMs,
+    isCompleted,
+    activity,
+    activityKind,
+  };
+
+  codexCache.set(filePath, { cacheKey, data });
+  return data;
+}
+
+// ==================== DB METADATA READER ====================
+function readSummariesDb(dbPath) {
   const summaryById = new Map();
   const parentOfChild = new Map();
-
-  if (!existsSync(dbPath)) {
-    return { summaryById, parentOfChild };
-  }
+  if (!existsSync(dbPath)) return { summaryById, parentOfChild };
 
   let db;
   try {
     db = new DatabaseSync(dbPath, { readOnly: true });
     db.exec('PRAGMA busy_timeout = 1000;');
-
     const rows = db
       .prepare(`
         SELECT
@@ -231,6 +494,7 @@ function readDbMetadata(appDataDir) {
           killed,
           last_modified_time,
           workspace_uris,
+          project_id,
           agent_name,
           parent_conversation_id,
           nesting_depth,
@@ -242,18 +506,23 @@ function readDbMetadata(appDataDir) {
       .all();
 
     for (const r of rows) {
-      const ws = parseWorkspaceInfo(r.workspace_uris);
-      const st = localizeStatus(r.status, Boolean(r.not_fully_idle), Boolean(r.killed));
+      let uris = [];
+      try {
+        const parsed = JSON.parse(r.workspace_uris || '[]');
+        if (Array.isArray(parsed)) uris = parsed.map(String);
+      } catch {
+        // ignore
+      }
+      const running = Boolean(r.not_fully_idle) || r.status === 'CASCADE_RUN_STATUS_RUNNING';
       summaryById.set(r.conversation_id, {
         id: r.conversation_id,
         title: (r.title || '').trim() || (r.preview || '').trim().slice(0, 44) || '',
-        workspace: ws.name,
-        workspaceUri: ws.uri,
+        workspaceUris: uris,
+        projectId: String(r.project_id || ''),
         stepCount: Number(r.step_count || 0),
-        status: st.code,
-        statusLabel: st.label,
-        isRunning: st.code === 'running',
+        isRunning: running && !r.killed,
         killed: Boolean(r.killed),
+        statusLabel: r.killed ? '已结束' : running ? '运行中' : '空闲',
         lastModifiedMs: parseTimestampMs(r.last_modified_time),
         agentName: String(r.agent_name || ''),
         parentId: String(r.parent_conversation_id || ''),
@@ -273,10 +542,10 @@ function readDbMetadata(appDataDir) {
         }
       }
     } catch {
-      // conversation_parents might not exist in older builds
+      // ignore
     }
   } catch (err) {
-    console.error('[prism_studio] Failed to read conversation_summaries.db:', err.message);
+    console.error(`[prism_studio] Failed to read ${dbPath}:`, err.message);
   } finally {
     try {
       db?.close();
@@ -284,12 +553,10 @@ function readDbMetadata(appDataDir) {
       // ignore
     }
   }
-
   return { summaryById, parentOfChild };
 }
 
 function readSubagentDescriptors(brainDir, parentIds) {
-  // Map<childConvId, { parentId, typeName, role, state, spawnStepIndex, workspace, workspaceUri }>
   const map = new Map();
   for (const parentId of parentIds) {
     const dir = join(brainDir, parentId, '.system_generated', 'subagents');
@@ -304,67 +571,40 @@ function readSubagentDescriptors(brainDir, parentIds) {
       try {
         const raw = JSON.parse(readFileSync(join(dir, f), 'utf-8'));
         const cid = raw.conversationId || f.replace(/\.json$/, '');
-        const ws = parseWorkspaceInfo(raw.workspaceUris);
         map.set(cid, {
           parentId,
           typeName: raw.subagentDescriptor?.typeName || '',
           role: raw.subagentDescriptor?.role || '',
           state: raw.state || '',
-          spawnStepIndex: Number(raw.spawnStepIndex || 0),
-          workspace: ws.name,
-          workspaceUri: ws.uri,
+          workspaceUris: Array.isArray(raw.workspaceUris) ? raw.workspaceUris : [],
         });
       } catch {
-        // ignore torn JSON
+        // ignore
       }
     }
   }
   return map;
 }
 
-function readSwarmWorkers(brainDir, parentIds) {
-  const workers = [];
-  for (const parentId of parentIds) {
-    const membersPath = join(brainDir, parentId, '.system_generated', 'swarm', 'members.json');
-    if (!existsSync(membersPath)) continue;
-    try {
-      const raw = JSON.parse(readFileSync(membersPath, 'utf-8'));
-      const members = raw?.members && typeof raw.members === 'object' ? raw.members : {};
-      for (const [name, m] of Object.entries(members)) {
-        if (!m || m.role === 'coordinator') continue;
-        const cid = m.conversationId || m.conversation_id || '';
-        if (!cid) continue;
-        workers.push({
-          id: cid,
-          parentId,
-          role: m.role || name,
-          typeName: 'swarm',
-          name,
-          state: m.killed ? 'killed' : m.status || 'active',
-        });
-      }
-    } catch {
-      // ignore
-    }
-  }
-  return workers;
-}
-
-function summarizeModels(turns) {
+function summarizeModelEntries(entries) {
   const map = new Map();
   let totalUncached = 0;
   let totalCacheRead = 0;
   let totalOutput = 0;
   let totalCostUsd = 0;
 
-  for (const t of turns) {
+  for (const t of entries) {
     const mId = t.model || 'unknown';
-    let entry = map.get(mId);
+    const { baseModel, effort } = parseModelAndEffort(mId, t.effort || '');
+    const key = mId;
+    let entry = map.get(key);
     if (!entry) {
       entry = {
         model: mId,
         displayName: formatModelName(mId),
-        family: classifyModelFamily(mId),
+        baseModel,
+        effort,
+        sourceTag: t.sourceTag || '',
         uncachedInput: 0,
         cacheRead: 0,
         output: 0,
@@ -372,13 +612,13 @@ function summarizeModels(turns) {
         turns: 0,
         costUsd: 0,
       };
-      map.set(mId, entry);
+      map.set(key, entry);
     }
     entry.uncachedInput += t.uncachedInput;
     entry.cacheRead += t.cacheRead;
     entry.output += t.output;
     entry.totalTokens += t.uncachedInput + t.cacheRead + t.output;
-    entry.turns += 1;
+    entry.turns += t.turns || 1;
     const cost = estimateCostUsd(mId, t.uncachedInput, t.cacheRead, t.output);
     entry.costUsd += cost;
 
@@ -424,145 +664,155 @@ function getRangeCutoffMs(range) {
   return 0;
 }
 
-function buildQuotaWindow(turns, windowMs, budgetTokens, nowMs) {
-  const cutoff = nowMs - windowMs;
-  let tokens = 0;
-  let weightedTokens = 0;
-  let calls = 0;
-  let earliestTs = 0;
-
-  for (const t of turns) {
-    if (!t.ts || t.ts < cutoff) continue;
-    const total = t.uncachedInput + t.cacheRead + t.output;
-    tokens += total;
-    // Weighted quota pressure: cache reads count ~0.1x, uncached input 1x, output 4x
-    weightedTokens += t.uncachedInput + t.cacheRead * 0.1 + t.output * 4;
-    calls += 1;
-    if (!earliestTs || t.ts < earliestTs) earliestTs = t.ts;
-  }
-
-  const resetAtMs = earliestTs ? earliestTs + windowMs : 0;
-  const resetInMs = resetAtMs ? Math.max(0, resetAtMs - nowMs) : 0;
-  const usedRatio = budgetTokens > 0 ? Math.min(100, Math.round((tokens / budgetTokens) * 1000) / 10) : 0;
-
-  return {
-    tokens,
-    weightedTokens: Math.round(weightedTokens),
-    calls,
-    budgetTokens,
-    usedPercent: usedRatio,
-    remainingPercent: Math.max(0, Math.round((100 - usedRatio) * 10) / 10),
-    resetAtMs,
-    resetInMs,
-  };
-}
-
 export function buildTelemetrySnapshot({
   conversationId = '',
   hostConversationId = '',
   activeWorkspaceUri = '',
-  projectFilter = '',
+  selectedProjectId = '',
   followLatest = true,
-  includeSubagentsInSession = false,
+  statsScope = 'project', // 'project' | 'session' | 'all'
   range = 'today',
   windowLimit = 512000,
-  quotaBudgets = {},
+  includeCliInProject = true,
+  showRecentAgents = false,
 } = {}) {
   const appDataDir = resolveAppDataDir();
-  const brainDir = join(appDataDir, 'brain');
+  const desktopBrainDir = join(appDataDir, 'brain');
+  const cliAppDataDir = join(homedir(), '.gemini', 'antigravity-cli');
+  const cliBrainDir = join(cliAppDataDir, 'brain');
   const nowMs = Date.now();
-  const { summaryById, parentOfChild } = readDbMetadata(appDataDir);
 
-  const brainIds = existsSync(brainDir)
-    ? readdirSync(brainDir).filter((d) => /^[0-9a-f-]{8,}$/i.test(d))
-    : [];
+  // 1. Real configured projects matching Antigravity's left sidebar 1-to-1!
+  const configuredProjects = loadConfiguredProjects();
 
-  // Identify top-level conversations vs subagents
-  const topConversations = [];
-  for (const s of summaryById.values()) {
-    const isChild = Boolean(s.parentId || s.nestingDepth > 0 || parentOfChild.has(s.id));
-    const isCliEphemeral = s.source === 'CORTEX_TRAJECTORY_SOURCE_CLI' && !s.title;
-    if (!isChild && !isCliEphemeral) {
-      topConversations.push({
-        ...s,
-        title: s.title || '未命名会话',
+  // 2. Read desktop & CLI DB metadata
+  const desktopDb = readSummariesDb(join(appDataDir, 'conversation_summaries.db'));
+  const cliDb = readSummariesDb(join(cliAppDataDir, 'conversation_summaries.db'));
+  const summaryById = new Map([...cliDb.summaryById, ...desktopDb.summaryById]);
+  const parentOfChild = new Map([...cliDb.parentOfChild, ...desktopDb.parentOfChild]);
+
+  // Helper: map any conversation or CLI session to one of the real configured Projects
+  function resolveProjectForConv(cid, extraPaths = []) {
+    const s = summaryById.get(cid);
+    const paths = [...(s?.workspaceUris || []), ...extraPaths];
+    const direct = matchProjectByPathOrId(configuredProjects, { projectId: s?.projectId || '', paths });
+    if (direct) return direct;
+    const pid = parentOfChild.get(cid);
+    if (pid) {
+      const ps = summaryById.get(pid);
+      const fromParent = matchProjectByPathOrId(configuredProjects, {
+        projectId: ps?.projectId || '',
+        paths: ps?.workspaceUris || [],
       });
+      if (fromParent) return fromParent;
     }
+    return null;
+  }
+
+  // Build top-level conversations belonging to configured projects (or fallback)
+  const topConversations = [];
+  for (const s of desktopDb.summaryById.values()) {
+    const isChild = Boolean(s.parentId || s.nestingDepth > 0 || parentOfChild.has(s.id));
+    const isCliEphemeral = s.source === 'CORTEX_TRAJECTORY_SOURCE_CLI';
+    if (isChild || isCliEphemeral) continue;
+    const proj = resolveProjectForConv(s.id);
+    if (!proj) continue; // Only include conversations belonging to real sidebar Projects!
+    topConversations.push({
+      id: s.id,
+      title: s.title || '未命名会话',
+      projectId: proj.id,
+      projectName: proj.name,
+      stepCount: s.stepCount,
+      isRunning: s.isRunning,
+      statusLabel: s.statusLabel,
+      lastModifiedMs: s.lastModifiedMs,
+    });
   }
   topConversations.sort((a, b) => b.lastModifiedMs - a.lastModifiedMs);
 
-  // Resolve active conversation accurately!
-  // Priority when followLatest=true:
-  //   1. If host switched to a workspace that doesn't match hostConversationId, pick newest conversation in that workspace
-  //   2. Otherwise ALWAYS follow hostConversationId (the exact open conversation in Antigravity!)
-  //   3. Fallback to most recently modified top-level conversation
+  // Resolve active project & active conversation cleanly
   let activeConvId = conversationId;
+  let activeProject = selectedProjectId ? configuredProjects.find((p) => p.id === selectedProjectId) : null;
+
   if (followLatest) {
     const hostSummary = hostConversationId ? summaryById.get(hostConversationId) : null;
-    const normalizedActiveWs = String(activeWorkspaceUri || '').replace(/\/+$/, '');
-    const hostWs = String(hostSummary?.workspaceUri || '').replace(/\/+$/, '');
+    const hostProj = hostConversationId ? resolveProjectForConv(hostConversationId) : null;
+    const wsProj = activeWorkspaceUri ? matchProjectByPathOrId(configuredProjects, { paths: [activeWorkspaceUri] }) : null;
 
-    if (normalizedActiveWs && hostWs && normalizedActiveWs !== hostWs) {
-      const wsMatch = topConversations.find(
-        (c) => String(c.workspaceUri || '').replace(/\/+$/, '') === normalizedActiveWs,
-      );
-      activeConvId = wsMatch?.id || hostConversationId || topConversations[0]?.id || '';
-    } else if (hostConversationId) {
+    if (wsProj && hostProj && wsProj.id !== hostProj.id) {
+      activeProject = wsProj;
+      const inWs = topConversations.find((c) => c.projectId === wsProj.id);
+      activeConvId = inWs?.id || hostConversationId || topConversations[0]?.id || '';
+    } else if (hostConversationId && hostSummary) {
       activeConvId = hostConversationId;
-    } else if (normalizedActiveWs) {
-      const wsMatch = topConversations.find(
-        (c) => String(c.workspaceUri || '').replace(/\/+$/, '') === normalizedActiveWs,
-      );
-      activeConvId = wsMatch?.id || topConversations[0]?.id || '';
+      activeProject = hostProj || wsProj || configuredProjects[0] || null;
+    } else if (wsProj) {
+      activeProject = wsProj;
+      activeConvId = topConversations.find((c) => c.projectId === wsProj.id)?.id || topConversations[0]?.id || '';
     } else {
       activeConvId = topConversations[0]?.id || '';
+      activeProject = topConversations[0]
+        ? configuredProjects.find((p) => p.id === topConversations[0].projectId) || configuredProjects[0] || null
+        : configuredProjects[0] || null;
     }
-  } else if (!activeConvId) {
-    activeConvId = hostConversationId || topConversations[0]?.id || '';
+  } else {
+    if (activeConvId) {
+      const convProj = resolveProjectForConv(activeConvId);
+      if (!activeProject && convProj) activeProject = convProj;
+    } else if (activeProject) {
+      activeConvId = topConversations.find((c) => c.projectId === activeProject.id)?.id || '';
+    } else {
+      activeConvId = hostConversationId || topConversations[0]?.id || '';
+      activeProject = resolveProjectForConv(activeConvId) || configuredProjects[0] || null;
+    }
   }
 
-  // Build subagent descriptors from all known parent conversations
-  const parentIdSet = new Set(topConversations.map((c) => c.id));
-  for (const pid of parentOfChild.values()) parentIdSet.add(pid);
-  const subDescriptors = readSubagentDescriptors(brainDir, [...parentIdSet]);
-  const swarmWorkers = readSwarmWorkers(brainDir, [...parentIdSet]);
-  const swarmMap = new Map(swarmWorkers.map((w) => [w.id, w]));
-
-  // Merge all discovered parent->child relations
-  for (const [cid, desc] of subDescriptors.entries()) {
-    if (!parentOfChild.has(cid)) parentOfChild.set(cid, desc.parentId);
-  }
-  for (const w of swarmWorkers) {
-    if (!parentOfChild.has(w.id)) parentOfChild.set(w.id, w.parentId);
+  // Parse all desktop + agy-cli transcripts (cached by mtime:size)
+  const parsedDesktop = new Map();
+  if (existsSync(desktopBrainDir)) {
+    for (const id of readdirSync(desktopBrainDir)) {
+      if (!/^[0-9a-f-]{8,}$/i.test(id)) continue;
+      const p = join(desktopBrainDir, id, '.system_generated', 'logs', 'transcript.jsonl');
+      const parsed = parseAgyTranscript(p);
+      if (parsed) parsedDesktop.set(id, parsed);
+    }
   }
 
-  // Parse all transcripts once (cached by mtime:size)
-  const parsedById = new Map();
-  for (const id of brainIds) {
-    const p = join(brainDir, id, '.system_generated', 'logs', 'transcript.jsonl');
-    const parsed = parseTranscriptFile(p);
-    if (parsed) parsedById.set(id, parsed);
+  const parsedAgyCli = new Map();
+  if (existsSync(cliBrainDir)) {
+    for (const id of readdirSync(cliBrainDir)) {
+      if (!/^[0-9a-f-]{8,}$/i.test(id)) continue;
+      const p = join(cliBrainDir, id, '.system_generated', 'logs', 'transcript.jsonl');
+      const parsed = parseAgyTranscript(p);
+      if (parsed) parsedAgyCli.set(id, parsed);
+    }
   }
 
-  // Active conversation metadata & context
+  // Parse recent Codex CLI sessions (last 7 days for stats & live monitor)
+  const codexSessions = [];
+  for (const f of listRecentCodexFiles(30 * 24 * 60 * 60 * 1000)) {
+    const parsed = parseCodexSession(f.path, f);
+    if (!parsed) continue;
+    const proj = matchProjectByPathOrId(configuredProjects, { paths: [parsed.cwd] });
+    if (proj) {
+      codexSessions.push({ ...parsed, projectId: proj.id, projectName: proj.name });
+    }
+  }
+
+  // Active conversation metadata & REAL-TIME CONTEXT WINDOW (completely separate card!)
   const activeSummary = summaryById.get(activeConvId);
-  const activeData = activeConvId ? parsedById.get(activeConvId) : null;
+  const activeData = parsedDesktop.get(activeConvId) || parsedAgyCli.get(activeConvId) || null;
   const activeTurns = activeData?.turns || [];
   const latestTurn = activeTurns.length > 0 ? activeTurns[activeTurns.length - 1] : null;
-
-  const activeConv = activeSummary
-    ? { ...activeSummary, title: activeSummary.title || activeData?.firstPromptPreview || '当前会话' }
-    : {
-        id: activeConvId,
-        title: activeData?.firstPromptPreview || (activeConvId ? '当前会话' : '暂无会话'),
-        workspace: '全局',
-        workspaceUri: '',
-        status: 'idle',
-        statusLabel: '就绪',
-        isRunning: false,
-        stepCount: activeData?.totalSteps || 0,
-        lastModifiedMs: activeData?.lastStepAt || nowMs,
-      };
+  const activeConvObj = {
+    id: activeConvId,
+    title: activeSummary?.title || (activeConvId ? '当前会话' : '暂无会话'),
+    projectId: activeProject?.id || '',
+    projectName: activeProject?.name || '项目',
+    isRunning: Boolean(activeSummary?.isRunning),
+    statusLabel: activeSummary?.statusLabel || '就绪',
+    stepCount: activeSummary?.stepCount || activeData?.totalSteps || 0,
+  };
 
   const limit = Math.max(32000, Number(windowLimit) || 512000);
   const usedTokens = latestTurn ? latestTurn.contextTokens : 0;
@@ -586,223 +836,252 @@ export function buildTelemetrySnapshot({
     speedPoints.length > 0
       ? Math.round((speedPoints.reduce((acc, p) => acc + p.rate, 0) / speedPoints.length) * 10) / 10
       : 0;
+  const parsedLastModel = parseModelAndEffort(activeData?.lastModel || latestTurn?.model || '');
 
-  // Current conversation model share (pure main conversation by default; optionally roll up its direct subagents)
-  const childIdsOfActive = [];
-  for (const [cid, pid] of parentOfChild.entries()) {
-    if (pid === activeConvId) childIdsOfActive.push(cid);
-  }
-  const sessionTurnsForShare = [...activeTurns];
-  if (includeSubagentsInSession) {
-    for (const cid of childIdsOfActive) {
-      const cp = parsedById.get(cid);
-      if (cp?.turns?.length) sessionTurnsForShare.push(...cp.turns);
-    }
-  }
-  const sessionModelUsage = {
-    ...summarizeModels(sessionTurnsForShare),
-    conversationId: activeConvId,
-    subagentCount: childIdsOfActive.length,
-    includeSubagents: Boolean(includeSubagentsInSession),
-  };
-
-  // Rolling 5h & 7d Quota Windows (Gemini vs Claude/GPT) across ALL transcripts
-  const geminiTurns = [];
-  const claudeTurns = [];
+  // ==================== UNIFIED PROJECT & SESSION STATS ====================
   const cutoffRangeMs = getRangeCutoffMs(range);
+  const filterByRange = (turns) => turns.filter((t) => !(cutoffRangeMs > 0 && t.ts > 0 && t.ts < cutoffRangeMs));
 
-  // Project-level aggregation (rolls up subagents into their parent's workspace!)
-  const projectMap = new Map();
-
-  function resolveWorkspaceForConv(convId) {
-    const s = summaryById.get(convId);
-    if (s && s.workspace && s.workspace !== '全局') return { name: s.workspace, uri: s.workspaceUri };
-    const desc = subDescriptors.get(convId);
-    if (desc && desc.workspace && desc.workspace !== '全局') return { name: desc.workspace, uri: desc.workspaceUri };
-    const pid = parentOfChild.get(convId);
-    if (pid) {
-      const ps = summaryById.get(pid);
-      if (ps && ps.workspace) return { name: ps.workspace, uri: ps.workspaceUri };
-    }
-    return { name: s?.workspace || '全局', uri: s?.workspaceUri || '' };
+  // Subagent descriptors for parent->project linking
+  const parentIds = new Set(topConversations.map((c) => c.id));
+  for (const pid of parentOfChild.values()) parentIds.add(pid);
+  const subDescriptors = readSubagentDescriptors(desktopBrainDir, [...parentIds]);
+  for (const [cid, desc] of subDescriptors.entries()) {
+    if (!parentOfChild.has(cid)) parentOfChild.set(cid, desc.parentId);
   }
 
-  for (const [cid, parsed] of parsedById.entries()) {
-    const ws = resolveWorkspaceForConv(cid);
-    const isSub = parentOfChild.has(cid) || Boolean(summaryById.get(cid)?.parentId);
+  // Session stats (strictly current conversation within chosen time range)
+  const sessionStats = summarizeModelEntries(filterByRange(activeTurns));
 
-    for (const t of parsed.turns) {
-      const fam = classifyModelFamily(t.model);
-      if (fam === 'claude') claudeTurns.push(t);
-      else geminiTurns.push(t);
-    }
-
-    const filteredTurns = parsed.turns.filter((t) => !(cutoffRangeMs > 0 && t.ts > 0 && t.ts < cutoffRangeMs));
-    if (filteredTurns.length === 0 && !summaryById.has(cid)) continue;
-
-    let proj = projectMap.get(ws.name);
-    if (!proj) {
-      proj = {
-        name: ws.name,
-        workspaceUri: ws.uri,
-        sessionIds: new Set(),
-        subagentIds: new Set(),
-        runningCount: 0,
-        turns: [],
-      };
-      projectMap.set(ws.name, proj);
-    }
-    if (isSub) proj.subagentIds.add(cid);
-    else proj.sessionIds.add(cid);
-    if (summaryById.get(cid)?.isRunning) proj.runningCount += 1;
-    proj.turns.push(...filteredTurns);
-  }
-
-  const projects = [...projectMap.values()]
-    .map((p) => {
-      const stats = summarizeModels(p.turns);
-      return {
-        name: p.name,
-        workspaceUri: p.workspaceUri,
-        sessionCount: p.sessionIds.size,
-        subagentCount: p.subagentIds.size,
-        runningCount: p.runningCount,
-        isCurrentProject: p.name === activeConv.workspace,
-        ...stats,
-      };
-    })
-    .filter((p) => p.totalTokens > 0 || p.runningCount > 0)
-    .sort((a, b) => {
-      if (a.isCurrentProject !== b.isCurrentProject) return a.isCurrentProject ? -1 : 1;
-      return b.totalTokens - a.totalTokens;
+  // Project stats map (ONLY configured sidebar Projects!)
+  const projectStatsMap = new Map();
+  for (const proj of configuredProjects) {
+    projectStatsMap.set(proj.id, {
+      id: proj.id,
+      name: proj.name,
+      sessionIds: new Set(),
+      cliCount: 0,
+      entries: [],
     });
-
-  // Overall range totals
-  const allRangeTurns = [];
-  for (const parsed of parsedById.values()) {
-    for (const t of parsed.turns) {
-      if (cutoffRangeMs > 0 && t.ts > 0 && t.ts < cutoffRangeMs) continue;
-      allRangeTurns.push(t);
-    }
   }
-  const overallUsage = summarizeModels(allRangeTurns);
 
-  // Build Subagent Live Monitor list (combines conversation_parents + subagents/*.json + conversation_summaries + swarm + recent CLI agents)
-  const subagentIds = new Set([...parentOfChild.keys(), ...subDescriptors.keys(), ...swarmMap.keys()]);
-  const recentCliCutoff = nowMs - 24 * 60 * 60 * 1000;
-  for (const s of summaryById.values()) {
-    if (s.source === 'CORTEX_TRAJECTORY_SOURCE_CLI' && (s.isRunning || s.lastModifiedMs >= recentCliCutoff)) {
-      subagentIds.add(s.id);
-    }
-  }
-  const subagents = [];
-
-  for (const cid of subagentIds) {
-    const pid = parentOfChild.get(cid) || subDescriptors.get(cid)?.parentId || '';
-    const parentSummary = summaryById.get(pid);
-    const childSummary = summaryById.get(cid);
+  for (const [cid, parsed] of parsedDesktop.entries()) {
     const desc = subDescriptors.get(cid);
-    const swarm = swarmMap.get(cid);
-    const parsed = parsedById.get(cid);
-    const isCliAgent = childSummary?.source === 'CORTEX_TRAJECTORY_SOURCE_CLI';
+    const proj = resolveProjectForConv(cid, desc?.workspaceUris || []);
+    if (!proj) continue;
+    const bucket = projectStatsMap.get(proj.id);
+    if (!parentOfChild.has(cid)) bucket.sessionIds.add(cid);
+    const ranged = filterByRange(parsed.turns);
+    if (ranged.length) bucket.entries.push(...ranged);
+  }
 
-    const lastActiveMs = Math.max(
-      childSummary?.lastModifiedMs || 0,
-      parsed?.lastStepAt || 0,
-      parsed?.mtimeMs || 0,
-    );
+  if (includeCliInProject) {
+    for (const [cid, parsed] of parsedAgyCli.entries()) {
+      const proj = resolveProjectForConv(cid);
+      if (!proj) continue;
+      const bucket = projectStatsMap.get(proj.id);
+      const ranged = filterByRange(parsed.turns);
+      if (ranged.length) {
+        bucket.cliCount += 1;
+        bucket.entries.push(...ranged.map((t) => ({ ...t, sourceTag: 'AGY CLI' })));
+      }
+    }
+    for (const cs of codexSessions) {
+      if (cutoffRangeMs > 0 && cs.lastActiveMs < cutoffRangeMs) continue;
+      if (cs.totalTokens <= 0) continue;
+      const bucket = projectStatsMap.get(cs.projectId);
+      if (!bucket) continue;
+      bucket.cliCount += 1;
+      bucket.entries.push({
+        model: cs.model,
+        effort: cs.effort,
+        uncachedInput: cs.uncachedInput,
+        cacheRead: cs.cacheRead,
+        output: cs.output,
+        turns: Math.max(1, cs.turnCount),
+        sourceTag: 'Codex CLI',
+      });
+    }
+  }
 
-    // Determine live state cleanly
-    const recentlyTouched = lastActiveMs > 0 && nowMs - lastActiveMs < 90 * 1000;
-    const isRunning =
-      Boolean(childSummary?.isRunning) ||
-      (recentlyTouched && parsed?.lastStepStatus !== 'DONE') ||
-      swarm?.state === 'working';
-    const isAliveRecent = !isRunning && lastActiveMs > 0 && nowMs - lastActiveMs < 30 * 60 * 1000;
+  const projectSummaries = configuredProjects.map((proj) => {
+    const bkt = projectStatsMap.get(proj.id);
+    const stats = summarizeModelEntries(bkt.entries);
+    return {
+      id: proj.id,
+      name: proj.name,
+      sessionCount: topConversations.filter((c) => c.projectId === proj.id).length,
+      cliCount: bkt.cliCount,
+      isActive: proj.id === activeProject?.id,
+      ...stats,
+    };
+  });
 
-    let statusCode = 'idle';
-    let statusLabel = '空闲';
-    if (childSummary?.killed || desc?.state === 'SUBAGENT_STATE_KILLED' || swarm?.state === 'killed') {
-      statusCode = 'killed';
-      statusLabel = '已结束';
-    } else if (isRunning) {
-      statusCode = 'running';
-      statusLabel = '运行中';
-    } else if (isAliveRecent || desc?.state === 'SUBAGENT_STATE_ALIVE') {
-      statusCode = 'alive';
-      statusLabel = '待命';
+  const activeProjectStats =
+    projectSummaries.find((p) => p.id === activeProject?.id) ||
+    projectSummaries[0] || {
+      id: '',
+      name: '当前项目',
+      sessionCount: 0,
+      cliCount: 0,
+      ...summarizeModelEntries([]),
+    };
+
+  const allProjectsEntries = [];
+  for (const bkt of projectStatsMap.values()) allProjectsEntries.push(...bkt.entries);
+  const allProjectsStats = summarizeModelEntries(allProjectsEntries);
+
+  // ==================== ACTIVE CLI & SUBAGENT MONITOR ====================
+  // Show ONLY live/active agents by default (running or touched within 3 min),
+  // or recent 60 min if user explicitly toggles showRecentAgents.
+  const LIVE_WINDOW_MS = 3 * 60 * 1000;
+  const RECENT_WINDOW_MS = 60 * 60 * 1000;
+  const liveAgents = [];
+  let recentHiddenCount = 0;
+
+  // A. Codex CLI agents (~/.codex/sessions)
+  for (const cs of codexSessions) {
+    const age = nowMs - cs.lastActiveMs;
+    const isRunning = !cs.isCompleted && age < 10 * 60 * 1000;
+    const isLive = isRunning || age <= LIVE_WINDOW_MS;
+    const isRecent = age <= RECENT_WINDOW_MS;
+    if (!isLive && !isRecent) continue;
+    if (!isLive && !showRecentAgents) {
+      recentHiddenCount += 1;
+      continue;
     }
 
-    const ws = resolveWorkspaceForConv(cid);
-    const turns = parsed?.turns || [];
-    const totalTokens = turns.reduce((acc, t) => acc + t.uncachedInput + t.cacheRead + t.output, 0);
-    const latestCtx = turns.length > 0 ? turns[turns.length - 1].contextTokens : 0;
+    const { baseModel, effort } = parseModelAndEffort(cs.model, cs.effort);
+    const promptTot = cs.uncachedInput + cs.cacheRead;
+    liveAgents.push({
+      id: cs.id,
+      shortId: cs.shortId,
+      kind: 'codex-cli',
+      kindLabel: cs.isCliExec ? 'Codex CLI' : 'Codex',
+      projectId: cs.projectId,
+      projectName: cs.projectName,
+      isRunning,
+      statusLabel: isRunning ? '运行中' : '刚完成',
+      activity: isRunning ? cs.activity : '本轮已完成',
+      activityKind: isRunning ? cs.activityKind : 'idle',
+      model: baseModel,
+      effort,
+      totalTokens: cs.totalTokens,
+      cacheHitRate: promptTot > 0 ? Math.round((cs.cacheRead / promptTot) * 100) : 0,
+      lastActiveMs: cs.lastActiveMs,
+      clickableConvId: '',
+    });
+  }
 
-    const typeLabel =
-      desc?.typeName ||
-      childSummary?.agentName ||
-      swarm?.typeName ||
-      (isCliAgent ? 'cli-agent' : 'subagent');
-    const roleLabel =
-      desc?.role ||
-      swarm?.name ||
-      childSummary?.title ||
-      (parsed?.firstPromptPreview ? parsed.firstPromptPreview.slice(0, 34) : `${typeLabel} #${cid.slice(0, 8)}`);
+  // B. AGY CLI agents (~/.gemini/antigravity-cli/brain)
+  for (const [cid, parsed] of parsedAgyCli.entries()) {
+    const s = summaryById.get(cid);
+    const proj = resolveProjectForConv(cid);
+    if (!proj) continue;
+    const lastActiveMs = Math.max(s?.lastModifiedMs || 0, parsed.lastStepAt || 0, parsed.mtimeMs || 0);
+    const age = nowMs - lastActiveMs;
+    const isRunning = Boolean(s?.isRunning) || (age < 90 * 1000 && parsed.lastStatus !== 'DONE');
+    const isLive = isRunning || age <= LIVE_WINDOW_MS;
+    const isRecent = age <= RECENT_WINDOW_MS;
+    if (!isLive && !isRecent) continue;
+    if (!isLive && !showRecentAgents) {
+      recentHiddenCount += 1;
+      continue;
+    }
 
-    subagents.push({
+    const totals = summarizeModelEntries(parsed.turns);
+    const { baseModel, effort } = parseModelAndEffort(parsed.lastModel);
+    liveAgents.push({
       id: cid,
       shortId: cid.slice(0, 8),
-      parentId: pid,
-      parentTitle: parentSummary?.title || (isCliAgent ? 'CLI 托管任务' : pid ? pid.slice(0, 8) : '主会话'),
-      workspace: ws.name,
-      typeName: typeLabel,
-      role: roleLabel,
-      status: statusCode,
-      statusLabel,
+      kind: 'agy-cli',
+      kindLabel: 'AGY CLI',
+      projectId: proj.id,
+      projectName: proj.name,
       isRunning,
-      parentIsRunning: Boolean(parentSummary?.isRunning),
-      stepCount: childSummary?.stepCount || parsed?.totalSteps || 0,
-      model: parsed?.lastModel ? formatModelName(parsed.lastModel) : '—',
-      totalTokens,
-      contextTokens: latestCtx,
+      statusLabel: isRunning ? '运行中' : '刚完成',
+      activity: isRunning ? parsed.activity : '本轮已完成',
+      activityKind: isRunning ? parsed.activityKind : 'idle',
+      model: baseModel,
+      effort,
+      totalTokens: totals.totalTokens,
+      cacheHitRate: Math.round(totals.cacheHitRate),
       lastActiveMs,
+      clickableConvId: '',
     });
   }
 
-  subagents.sort((a, b) => {
+  // C. Active Native Subagents (ONLY running or touched recently — zero dead history!)
+  const nativeSubIds = new Set([...parentOfChild.keys(), ...subDescriptors.keys()]);
+  for (const cid of nativeSubIds) {
+    const s = summaryById.get(cid);
+    const desc = subDescriptors.get(cid);
+    const parsed = parsedDesktop.get(cid);
+    if (!parsed && !s) continue;
+    const proj = resolveProjectForConv(cid, desc?.workspaceUris || []);
+    if (!proj) continue;
+
+    const lastActiveMs = Math.max(s?.lastModifiedMs || 0, parsed?.lastStepAt || 0, parsed?.mtimeMs || 0);
+    const age = nowMs - lastActiveMs;
+    const isRunning =
+      (Boolean(s?.isRunning) && !s?.killed) ||
+      (age < 60 * 1000 && parsed?.lastStatus && parsed.lastStatus !== 'DONE');
+    const isLive = isRunning || age <= LIVE_WINDOW_MS;
+    const isRecent = age <= RECENT_WINDOW_MS;
+    if (!isLive && !isRecent) continue;
+    if (!isLive && !showRecentAgents) {
+      recentHiddenCount += 1;
+      continue;
+    }
+
+    const totals = summarizeModelEntries(parsed?.turns || []);
+    const { baseModel, effort } = parseModelAndEffort(parsed?.lastModel || '');
+    const kindLabel = desc?.typeName ? `Sub · ${desc.typeName}` : 'Subagent';
+    liveAgents.push({
+      id: cid,
+      shortId: cid.slice(0, 8),
+      kind: 'subagent',
+      kindLabel,
+      projectId: proj.id,
+      projectName: proj.name,
+      isRunning,
+      statusLabel: isRunning ? '运行中' : '刚完成',
+      activity: isRunning ? parsed?.activity || '执行中' : '已完成',
+      activityKind: isRunning ? parsed?.activityKind || 'thinking' : 'idle',
+      model: baseModel,
+      effort,
+      totalTokens: totals.totalTokens,
+      cacheHitRate: Math.round(totals.cacheHitRate),
+      lastActiveMs,
+      clickableConvId: cid,
+    });
+  }
+
+  liveAgents.sort((a, b) => {
     if (a.isRunning !== b.isRunning) return a.isRunning ? -1 : 1;
-    if (a.parentIsRunning !== b.parentIsRunning) return a.parentIsRunning ? -1 : 1;
     return b.lastActiveMs - a.lastActiveMs;
   });
 
-  // Quota rolling windows (5h & 7d)
-  const FIVE_H = 5 * 60 * 60 * 1000;
-  const SEVEN_D = 7 * 24 * 60 * 60 * 1000;
-  const quotas = {
-    gemini: {
-      label: 'Gemini 系列',
-      h5: buildQuotaWindow(geminiTurns, FIVE_H, Number(quotaBudgets.gemini5h || 60_000_000), nowMs),
-      d7: buildQuotaWindow(geminiTurns, SEVEN_D, Number(quotaBudgets.gemini7d || 500_000_000), nowMs),
-    },
-    claude: {
-      label: 'Claude / GPT 系列',
-      h5: buildQuotaWindow(claudeTurns, FIVE_H, Number(quotaBudgets.claude5h || 15_000_000), nowMs),
-      d7: buildQuotaWindow(claudeTurns, SEVEN_D, Number(quotaBudgets.claude7d || 120_000_000), nowMs),
-    },
-  };
-
-  const projectNames = [...new Set(topConversations.map((c) => c.workspace).filter(Boolean))];
-  const filteredTopConversations = projectFilter
-    ? topConversations.filter((c) => c.workspace === projectFilter)
+  // Conversations filtered to the active project (or all if no project selected)
+  const visibleConversations = activeProject
+    ? topConversations.filter((c) => c.projectId === activeProject.id)
     : topConversations;
 
   return {
     updatedAt: nowMs,
-    activeConversation: activeConv,
-    projectNames,
-    projectFilter,
-    conversations: filteredTopConversations.slice(0, 30),
-    allConversationsCount: topConversations.length,
+    projects: projectSummaries,
+    activeProjectId: activeProject?.id || '',
+    activeProjectName: activeProject?.name || '项目',
+    activeConversation: activeConvObj,
+    conversations: visibleConversations.slice(0, 30),
+    stats: {
+      scope: statsScope,
+      range,
+      includeCliInProject,
+      project: activeProjectStats,
+      session: sessionStats,
+      all: allProjectsStats,
+    },
     context: {
       used: usedTokens,
       limit,
@@ -815,23 +1094,21 @@ export function buildTelemetrySnapshot({
         tools: toolTokens,
         remaining: remainingTokens,
       },
+      speed: {
+        latest: latestSpeed,
+        average: avgSpeed,
+        sparkline: speedPoints,
+        model: parsedLastModel.baseModel,
+        effort: parsedLastModel.effort,
+        rawModel: activeData?.lastModel || latestTurn?.model || '',
+        turnCount: activeTurns.length,
+      },
     },
-    sessionModels: sessionModelUsage,
-    speed: {
-      latest: latestSpeed,
-      average: avgSpeed,
-      sparkline: speedPoints,
-      lastModel: activeData?.lastModel || latestTurn?.model || '',
-      lastModelDisplay: formatModelName(activeData?.lastModel || latestTurn?.model || ''),
-      lastStepAt: activeData?.lastStepAt || 0,
-      turnCount: activeTurns.length,
-    },
-    quotas,
-    subagents: subagents.slice(0, 20),
-    projects,
-    overallUsage: {
-      range,
-      ...overallUsage,
+    activeAgents: {
+      items: liveAgents.slice(0, 12),
+      runningCount: liveAgents.filter((a) => a.isRunning).length,
+      recentHiddenCount,
+      showRecent: Boolean(showRecentAgents),
     },
   };
 }

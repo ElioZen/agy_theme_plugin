@@ -2,19 +2,19 @@
   "command": "node",
   "args": ["main.mjs"],
   "restart_policy": "always",
-  "display_name": "棱镜星轨",
-  "description": "Liquid Glass 主题美化工坊、星海壁纸与 macOS 整窗氛围伴侣，以及实时上下文占用、模型 Token/缓存命中率与生成速率驾驶舱。",
+  "display_name": "驾驶舱",
+  "description": "Antigravity 实时驾驶舱与液态玻璃外观美化：项目/会话模型占比统计、独立实时上下文窗口、活动 CLI/子智能体监控与 macOS 整窗星光贴背壁纸。",
   "has_web_ui": true,
   "agent_permissions": {
     "allows_user_interactions": false
   },
   "ui_config": {
-    "display_name": "棱镜星轨",
+    "display_name": "驾驶舱",
     "views": [
       {
         "path": "/",
         "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE",
-        "title": "棱镜星轨"
+        "title": "驾驶舱"
       }
     ]
   }

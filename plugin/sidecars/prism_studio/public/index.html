@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>棱镜星轨 · Prism Orbit</title>
+  <title>驾驶舱</title>
   <script src="/preload.js"></script>
   <link rel="stylesheet" href="/styles.css" />
 </head>
@@ -14,50 +14,88 @@
 
   <!-- Main Shell -->
   <div class="app-shell">
-    <!-- Top Ultra-Clear Glass Bar -->
+    <!-- Ultra-Minimal Space-Saving Topbar -->
     <header class="topbar glass-surface">
       <div class="topbar-left">
-        <img src="/logo.svg" alt="棱镜星轨" class="brand-logo" />
-        <nav class="nav-tabs" role="tablist">
-          <button class="nav-tab active" data-tab="cockpit" role="tab" aria-selected="true">驾驶舱</button>
-          <button class="nav-tab" data-tab="studio" role="tab" aria-selected="false">外观美化</button>
-        </nav>
+        <img src="/logo.svg" alt="驾驶舱" class="brand-logo" />
+        <select id="select-project" class="glass-select top-project-select" aria-label="切换项目"></select>
+        <button id="btn-follow-latest" class="toggle-chip active" type="button" title="自动跟随 Antigravity 当前打开的会话与项目">
+          <span class="status-dot"></span>
+          <span>跟随</span>
+        </button>
       </div>
       <div class="topbar-right">
-        <button id="btn-top-companion" class="toggle-chip top-comp-btn" type="button" title="一键开关 macOS 整窗星光贴背壁纸">
-          <span class="status-dot"></span>
-          <span>整窗氛围</span>
-        </button>
+        <button id="btn-page-toggle" class="ghost-btn page-switch-btn" type="button">外观美化</button>
         <button id="btn-refresh" class="icon-pill" title="立即刷新">↻</button>
       </div>
     </header>
 
     <!-- Scrollable Content -->
     <main class="main-scroll">
-      <!-- ==================== TAB 1: COCKPIT ==================== -->
-      <section id="tab-cockpit" class="tab-panel active">
-        <!-- Project & Conversation Switcher -->
-        <div class="glass-card switcher-card">
-          <div class="switcher-row">
-            <button id="btn-follow-latest" class="toggle-chip active" type="button" title="自动跟随 Antigravity 当前打开的会话与工作区">
-              <span class="status-dot"></span>
-              <span>跟随当前</span>
-            </button>
-            <select id="select-project" class="glass-select project-select" aria-label="切换项目"></select>
-            <span id="active-status-pill" class="badge-pill">就绪</span>
-          </div>
-          <div class="switcher-row">
-            <select id="select-conversation" class="glass-select" aria-label="切换会话"></select>
-            <button id="btn-jump-conv" class="ghost-btn compact-btn" type="button" title="在主窗口切换到该会话">跳转</button>
-          </div>
+      <!-- ==================== PAGE 1 (DEFAULT): COCKPIT ==================== -->
+      <section id="page-cockpit" class="page-view active">
+        <!-- Compact Single-Line Session Switcher -->
+        <div class="glass-card session-strip">
+          <select id="select-conversation" class="glass-select" aria-label="切换会话"></select>
+          <span id="active-status-pill" class="badge-pill">就绪</span>
+          <button id="btn-jump-conv" class="ghost-btn compact-btn" type="button" title="在主窗口切换到该会话">跳转</button>
         </div>
 
-        <!-- 1. Hero Context Ring + Current Session Model Share -->
+        <!-- WINDOW 1 (TOP): Unified Project & Session Token Statistics -->
+        <div class="glass-card">
+          <div class="card-header wrap-header">
+            <div>
+              <h2 class="card-title">项目与会话统计</h2>
+              <div class="usage-totals tabular">
+                <strong id="stats-total-tokens">0</strong>
+                <span class="cost-pill" id="stats-total-cost">≈ $0.00</span>
+                <span class="cache-pill" id="stats-cache-rate">缓存 0%</span>
+              </div>
+            </div>
+            <div class="stats-controls">
+              <div class="seg-group" id="stats-scope-group">
+                <button class="seg-btn active" data-scope="project">当前项目</button>
+                <button class="seg-btn" data-scope="session">当前会话</button>
+                <button class="seg-btn" data-scope="all">全部项目</button>
+              </div>
+              <div class="seg-group" id="stats-range-group">
+                <button class="seg-btn active" data-range="today">今天</button>
+                <button class="seg-btn" data-range="7d">近7天</button>
+                <button class="seg-btn" data-range="30d">近30天</button>
+                <button class="seg-btn" data-range="all">全部</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="stats-meta-row">
+            <span id="stats-scope-caption" class="card-sub">—</span>
+            <label class="inline-check" id="wrap-include-cli">
+              <input id="chk-include-cli" type="checkbox" checked />
+              <span>含 CLI 消耗</span>
+            </label>
+          </div>
+
+          <!-- Cache / Uncached / Output summary -->
+          <div class="summary-strip tabular">
+            <span><i class="dot tertiary"></i>缓存命中 <strong id="sum-cache">0</strong></span>
+            <span><i class="dot accent"></i>未命中 <strong id="sum-uncached">0</strong></span>
+            <span><i class="dot secondary"></i>输出 <strong id="sum-output">0</strong></span>
+          </div>
+
+          <!-- Model Ratio Bar & Detailed Per-Model Breakdown -->
+          <div id="stats-ratio-bar" class="ratio-bar"></div>
+          <div id="stats-models-list" class="models-list"></div>
+
+          <!-- Per-Project Chips (shown when viewing All Projects) -->
+          <div id="all-projects-strip" class="projects-mini-grid" hidden></div>
+        </div>
+
+        <!-- WINDOW 2 (STANDALONE): Real-Time Context Window -->
         <div class="glass-card">
           <div class="card-header">
             <div>
-              <h2 class="card-title">上下文窗口与本会话模型占比</h2>
-              <p class="card-sub" id="context-subtitle">实时读取本地会话轨迹</p>
+              <h2 class="card-title">实时上下文窗口</h2>
+              <p class="card-sub" id="context-subtitle">当前会话实时占用 · 与累计统计独立</p>
             </div>
             <div class="seg-group" id="window-limit-group">
               <button class="seg-btn" data-limit="200000">200k</button>
@@ -88,7 +126,7 @@
               </svg>
               <div class="ring-center">
                 <span id="ring-percent" class="ring-percent tabular">0%</span>
-                <span class="ring-label">已占用</span>
+                <span class="ring-label">实时占用</span>
               </div>
             </div>
 
@@ -101,120 +139,45 @@
             </div>
           </div>
 
-          <!-- Per-Session Model Ratio -->
           <div class="sub-divider"></div>
-          <div class="session-share-head">
-            <div class="session-share-title">
-              <span>本会话模型用量比例</span>
-              <span id="session-total-badge" class="muted tabular">0 tokens</span>
+          <div class="ctx-live-footer">
+            <div class="ctx-live-item">
+              <span class="metric-label">当前模型</span>
+              <span id="ctx-model-badge" class="model-chip">—</span>
             </div>
-            <label class="inline-check" id="wrap-include-sub">
-              <input id="chk-include-subagents" type="checkbox" />
-              <span id="label-include-sub">含子智能体 (0)</span>
-            </label>
-          </div>
-          <div id="session-ratio-bar" class="ratio-bar"></div>
-          <div id="session-models-list" class="ratio-legend"></div>
-        </div>
-
-        <!-- 2. Quota Refresh Windows (5h & Weekly for Gemini + Claude/GPT) -->
-        <div class="glass-card">
-          <div class="card-header wrap-header">
-            <div>
-              <h2 class="card-title">额度滚动窗口与刷新监控</h2>
-              <p class="card-sub">本地精确统计 5 小时 / 每周（7 天）滑动消耗与最早释放倒计时</p>
+            <div class="ctx-live-item">
+              <span class="metric-label">思考强度</span>
+              <span id="ctx-effort-badge" class="effort-chip">—</span>
             </div>
-            <button id="btn-quota-settings" class="ghost-btn compact-btn" type="button">参考上限</button>
-          </div>
-
-          <div id="quota-budget-editor" class="budget-editor" hidden>
-            <div class="budget-grid">
-              <label><span>Gemini 5h 参考(M)</span><input id="inp-g5h" type="number" min="1" step="5" class="glass-input" /></label>
-              <label><span>Gemini 周 参考(M)</span><input id="inp-g7d" type="number" min="10" step="50" class="glass-input" /></label>
-              <label><span>Claude 5h 参考(M)</span><input id="inp-c5h" type="number" min="1" step="5" class="glass-input" /></label>
-              <label><span>Claude 周 参考(M)</span><input id="inp-c7d" type="number" min="10" step="20" class="glass-input" /></label>
+            <div class="ctx-live-item">
+              <span class="metric-label">生成速率</span>
+              <span class="speed-inline tabular"><strong id="metric-speed">—</strong> <span class="muted">tok/s</span></span>
             </div>
-            <div class="budget-actions">
-              <button id="btn-save-budgets" class="primary-btn compact-btn" type="button">保存参考上限</button>
+            <div class="sparkline-mini">
+              <svg id="speed-sparkline" class="sparkline-svg" viewBox="0 0 120 30" preserveAspectRatio="none"></svg>
             </div>
-          </div>
-
-          <div id="quota-grid" class="quota-grid"></div>
-
-          <!-- Compact Speed & Cache Telemetry Strip -->
-          <div class="sub-divider"></div>
-          <div class="telemetry-grid">
-            <div class="metric-block">
-              <div class="metric-label">本会话缓存命中</div>
-              <div class="metric-value tabular" id="metric-cache-rate">0%</div>
-            </div>
-            <div class="metric-block">
-              <div class="metric-label">实时生成速率</div>
-              <div class="metric-value tabular">
-                <span id="metric-speed">—</span><span class="metric-unit">tok/s</span>
-              </div>
-              <div class="metric-sub tabular" id="metric-speed-avg">均值 —</div>
-            </div>
-            <div class="sparkline-block">
-              <svg id="speed-sparkline" class="sparkline-svg" viewBox="0 0 180 42" preserveAspectRatio="none"></svg>
-            </div>
-          </div>
-          <div class="upstream-strip">
-            <span class="muted">最近上游模型</span>
-            <span id="last-model-badge" class="model-chip">—</span>
           </div>
         </div>
 
-        <!-- 3. Subagent Live Monitor (Includes parallel projects' subagents!) -->
+        <!-- WINDOW 3: Active CLI & Subagent Live Monitor -->
         <div class="glass-card">
           <div class="card-header wrap-header">
             <div>
               <div class="title-with-badge">
-                <h2 class="card-title">子智能体实时监控</h2>
-                <span id="subagent-count-badge" class="badge-pill">0 个</span>
+                <h2 class="card-title">活动 CLI 与子智能体</h2>
+                <span id="active-agents-badge" class="badge-pill">0 活动中</span>
               </div>
-              <p class="card-sub">同步追踪跨项目主会话派生的子智能体状态、步数与 Token 消耗</p>
+              <p class="card-sub">仅展示实时运行中的 Codex CLI / AGY CLI / 子智能体</p>
             </div>
-            <div class="seg-group" id="subagent-scope-group">
-              <button class="seg-btn active" data-subscope="all">全部项目</button>
-              <button class="seg-btn" data-subscope="current">当前项目</button>
-            </div>
+            <button id="btn-toggle-recent-agents" class="ghost-btn compact-btn" type="button">近期 1h (0)</button>
           </div>
-          <div id="subagents-list" class="subagents-list"></div>
-        </div>
-
-        <!-- 4. Project-Level Overall Statistics & Model Breakdown -->
-        <div class="glass-card">
-          <div class="card-header wrap-header">
-            <div>
-              <h2 class="card-title">项目整体统计与模型占比</h2>
-              <div class="usage-totals tabular">
-                <strong id="overall-total-tokens">0</strong>
-                <span class="cost-pill" id="overall-total-cost">≈ $0.00</span>
-              </div>
-            </div>
-            <div class="seg-group" id="usage-range-group">
-              <button class="seg-btn active" data-range="today">今天</button>
-              <button class="seg-btn" data-range="7d">近7天</button>
-              <button class="seg-btn" data-range="30d">近30天</button>
-              <button class="seg-btn" data-range="all">全部</button>
-            </div>
-          </div>
-
-          <div class="summary-strip tabular">
-            <span><i class="dot tertiary"></i>缓存命中 <strong id="sum-cache">0</strong></span>
-            <span><i class="dot accent"></i>未命中 <strong id="sum-uncached">0</strong></span>
-            <span><i class="dot secondary"></i>输出 <strong id="sum-output">0</strong></span>
-          </div>
-
-          <div id="projects-list" class="projects-list"></div>
-          <p class="footnote">* 项目统计自动归并主会话及其子智能体消耗；点击任意项目可快速切换筛选。</p>
+          <div id="agents-list" class="agents-list"></div>
         </div>
       </section>
 
-      <!-- ==================== TAB 2: THEME STUDIO ==================== -->
-      <section id="tab-studio" class="tab-panel">
-        <!-- macOS Full-Window Backdrop Companion -->
+      <!-- ==================== PAGE 2: APPEARANCE STUDIO ==================== -->
+      <section id="page-studio" class="page-view">
+        <!-- macOS Full-Window Backdrop Companion (moved cleanly out of topbar!) -->
         <div class="glass-card companion-card">
           <div class="card-header wrap-header">
             <div>
@@ -222,9 +185,9 @@
                 <h2 class="card-title">macOS 整窗氛围伴侣</h2>
                 <span id="companion-status-badge" class="badge-pill">准备就绪</span>
               </div>
-              <p class="card-sub">星光滤色引擎：星海与电车无缝贯穿左右窗口，同时保持代码与文字锐利不发灰</p>
+              <p class="card-sub">星光滤色引擎：壁纸无缝贯穿左右窗口，同时保持代码与文字锐利不发灰</p>
             </div>
-            <button id="btn-toggle-companion" class="primary-btn" type="button">开启整窗伴侣</button>
+            <button id="btn-toggle-companion" class="primary-btn" type="button">开启整窗氛围</button>
           </div>
 
           <div class="sliders-grid">

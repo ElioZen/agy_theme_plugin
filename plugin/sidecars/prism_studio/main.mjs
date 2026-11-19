@@ -192,6 +192,9 @@ app.api(
       data.followLatest !== undefined
         ? data.followLatest === 'true' || data.followLatest === true
         : settings.telemetry.followLatest;
+    const statsScope = ['project', 'session', 'all'].includes(data.statsScope)
+      ? data.statsScope
+      : settings.telemetry.statsScope || 'project';
     const range = ['today', '7d', '30d', 'all'].includes(data.range)
       ? data.range
       : settings.telemetry.range || 'today';
@@ -199,20 +202,27 @@ app.api(
     const conversationId = String(data.conversationId || '');
     const hostConversationId = String(data.hostConversationId || '');
     const activeWorkspaceUri = String(data.activeWorkspaceUri || '');
-    const projectFilter = String(data.projectFilter || '');
-    const includeSubagentsInSession =
-      data.includeSubagents === 'true' || data.includeSubagents === true;
+    const selectedProjectId = String(data.selectedProjectId || '');
+    const includeCliInProject =
+      data.includeCliInProject !== undefined
+        ? data.includeCliInProject === 'true' || data.includeCliInProject === true
+        : settings.telemetry.includeCliInProject !== false;
+    const showRecentAgents =
+      data.showRecentAgents !== undefined
+        ? data.showRecentAgents === 'true' || data.showRecentAgents === true
+        : Boolean(settings.telemetry.showRecentAgents);
 
     return buildTelemetrySnapshot({
       conversationId,
       hostConversationId,
       activeWorkspaceUri,
-      projectFilter,
+      selectedProjectId,
       followLatest,
-      includeSubagentsInSession,
+      statsScope,
       range,
       windowLimit,
-      quotaBudgets: settings.quotaBudgets || {},
+      includeCliInProject,
+      showRecentAgents,
     });
   },
   'GET',

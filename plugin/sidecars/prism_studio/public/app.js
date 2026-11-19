@@ -11,10 +11,9 @@
   const urlParams = new URLSearchParams(window.location.search);
   let hostConversationId = window.sidecar?.conversationId || urlParams.get('conversationId') || '';
   let activeWorkspaceUri = '';
+  let selectedProjectId = '';
   let manualConversationId = '';
-  let projectFilter = '';
-  let includeSubagents = false;
-  let subagentScope = 'all';
+  let currentPage = 'cockpit'; // 'cockpit' (default) | 'studio'
 
   let appState = null;
   let telemetry = null;
@@ -52,27 +51,14 @@
     return String(num);
   }
 
-  function formatCountdown(ms) {
-    if (!ms || ms <= 0) return '窗口已清零';
-    const totalSec = Math.floor(ms / 1000);
-    const days = Math.floor(totalSec / 86400);
-    const hours = Math.floor((totalSec % 86400) / 3600);
-    const mins = Math.floor((totalSec % 3600) / 60);
-    if (days > 0) return `${days}天 ${hours}小时后释放`;
-    if (hours > 0) return `${hours}小时 ${mins}分后释放`;
-    return `${Math.max(1, mins)}分钟后释放`;
-  }
-
   function formatRelativeTime(ms) {
     if (!ms) return '—';
     const diff = Math.max(0, Date.now() - ms);
     const sec = Math.floor(diff / 1000);
-    if (sec < 45) return '刚刚';
+    if (sec < 30) return '刚刚';
     const min = Math.floor(sec / 60);
     if (min < 60) return `${min} 分钟前`;
-    const hr = Math.floor(min / 60);
-    if (hr < 24) return `${hr} 小时前`;
-    return `${Math.floor(hr / 24)} 天前`;
+    return `${Math.floor(min / 60)} 小时前`;
   }
 
   function escapeHtml(str) {
@@ -105,7 +91,16 @@
     return out;
   }
 
-  // Listen to host theme & conversation/workspace updates
+  function setPage(page) {
+    currentPage = page === 'studio' ? 'studio' : 'cockpit';
+    $('#page-cockpit').classList.toggle('active', currentPage === 'cockpit');
+    $('#page-studio').classList.toggle('active', currentPage === 'studio');
+    const btn = $('#btn-page-toggle');
+    btn.textContent = currentPage === 'studio' ? '← 返回驾驶舱' : '外观美化';
+    btn.classList.toggle('is-in-studio', currentPage === 'studio');
+  }
+
+  // Host listeners
   window.addEventListener('message', (event) => {
     const msg = event.data;
     if (!msg || typeof msg !== 'object') return;
@@ -131,9 +126,7 @@
       const next = Array.isArray(uris) && uris.length > 0 ? uris[0] : '';
       if (next !== activeWorkspaceUri) {
         activeWorkspaceUri = next;
-        if (appState?.settings?.telemetry?.followLatest !== false) {
-          loadTelemetry();
-        }
+        if (appState?.settings?.telemetry?.followLatest !== false) loadTelemetry();
       }
     });
   }
@@ -212,7 +205,6 @@
 
     $('#btn-follow-host').classList.toggle('active', Boolean(settings.followHostTheme));
 
-    // Presets
     const allPresets = [...builtinPresets, ...(settings.customPresets || [])];
     $('#preset-pills').innerHTML = allPresets
       .map((p) => {
@@ -231,7 +223,6 @@
       })
       .join('');
 
-    // Color pickers
     $('#color-pickers').innerHTML = COLOR_CHANNELS.map((ch) => {
       const hex = (settings.colors?.[ch.key] || '#6EA8FF').toUpperCase();
       return `
@@ -245,7 +236,6 @@
       `;
     }).join('');
 
-    // Wallpapers
     const wp = settings.wallpaper || {};
     const allWallpapers = [
       ...builtinWallpapers.map((w) => ({ ...w, kind: 'builtin' })),
@@ -284,7 +274,6 @@
       b.classList.toggle('active', b.dataset.fit === (wp.fit || 'cover'));
     });
 
-    // Companion
     const comp = settings.companion || {};
     $('#range-comp-opacity').value = comp.opacity ?? 62;
     $('#val-comp-opacity').textContent = `${comp.opacity ?? 62}%`;
@@ -303,12 +292,10 @@
 
     const badge = $('#companion-status-badge');
     const toggleBtn = $('#btn-toggle-companion');
-    const topBtn = $('#btn-top-companion');
     const errEl = $('#companion-error');
     badge.classList.remove('running', 'warn');
 
     const isCompanionActive = Boolean(companion?.running && comp.enabled);
-    topBtn.classList.toggle('active', isCompanionActive);
     document.body.classList.toggle('companion-seamless', isCompanionActive && comp.seamlessRightPane !== false);
 
     if (!companion?.supported) {
@@ -322,11 +309,11 @@
     } else if (isCompanionActive) {
       badge.textContent = '● 运行中 · 星光贯穿';
       badge.classList.add('running');
-      toggleBtn.textContent = '关闭整窗伴侣';
+      toggleBtn.textContent = '关闭整窗氛围';
       toggleBtn.classList.add('is-active-danger');
     } else {
       badge.textContent = companion.binaryReady ? '准备就绪' : '待启动';
-      toggleBtn.textContent = '开启整窗伴侣';
+      toggleBtn.textContent = '开启整窗氛围';
       toggleBtn.classList.remove('is-active-danger');
     }
 
@@ -336,29 +323,22 @@
     } else {
       errEl.hidden = true;
     }
-
-    // Quota budget editor inputs
-    const qb = settings.quotaBudgets || {};
-    $('#inp-g5h').value = Math.round((qb.gemini5h || 60_000_000) / 1_000_000);
-    $('#inp-g7d').value = Math.round((qb.gemini7d || 500_000_000) / 1_000_000);
-    $('#inp-c5h').value = Math.round((qb.claude5h || 15_000_000) / 1_000_000);
-    $('#inp-c7d').value = Math.round((qb.claude7d || 120_000_000) / 1_000_000);
   }
 
   // ==================== RENDER: COCKPIT ====================
   function renderSparkline(points) {
     const svg = $('#speed-sparkline');
     if (!points || points.length < 2) {
-      svg.innerHTML = `<text x="90" y="24" text-anchor="middle" fill="var(--prism-muted)" font-size="10">等待更多生成轮次...</text>`;
+      svg.innerHTML = `<text x="60" y="18" text-anchor="middle" fill="var(--prism-muted)" font-size="9">待采样</text>`;
       return;
     }
     const vals = points.map((p) => p.rate);
     const min = Math.min(...vals);
     const max = Math.max(...vals, min + 1);
-    const w = 180;
-    const h = 42;
-    const padX = 5;
-    const padY = 5;
+    const w = 120;
+    const h = 30;
+    const padX = 4;
+    const padY = 4;
 
     const coords = vals.map((v, i) => {
       const x = padX + (i / (vals.length - 1)) * (w - padX * 2);
@@ -378,45 +358,137 @@
         </linearGradient>
       </defs>
       <path d="${areaD}" fill="url(#sparkFill)" />
-      <path d="${lineD}" fill="none" stroke="var(--prism-tertiary)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
-      <circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="2.8" fill="var(--prism-tertiary)" />
+      <path d="${lineD}" fill="none" stroke="var(--prism-tertiary)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+      <circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="2.4" fill="var(--prism-tertiary)" />
     `;
   }
 
   function renderCockpit() {
     if (!telemetry || !appState) return;
-    const { settings } = appState;
-    const telCfg = settings.telemetry || {};
+    const telCfg = appState.settings.telemetry || {};
     const activeConv = telemetry.activeConversation;
 
     $('#btn-follow-latest').classList.toggle('active', Boolean(telCfg.followLatest));
 
-    // Project selector
+    // Topbar Project Selector (strictly matches left sidebar Projects!)
     const projSel = $('#select-project');
-    const projNames = telemetry.projectNames || [];
-    projSel.innerHTML =
-      `<option value="" ${!projectFilter ? 'selected' : ''}>全部项目 (${projNames.length})</option>` +
-      projNames
-        .map((name) => `<option value="${escapeHtml(name)}" ${projectFilter === name ? 'selected' : ''}>${escapeHtml(name)}</option>`)
-        .join('');
+    const projects = telemetry.projects || [];
+    projSel.innerHTML = projects.length
+      ? projects
+          .map(
+            (p) =>
+              `<option value="${escapeHtml(p.id)}" ${p.id === telemetry.activeProjectId ? 'selected' : ''}>${escapeHtml(p.name)}</option>`,
+          )
+          .join('')
+      : `<option value="">暂无项目</option>`;
 
-    // Conversation selector
+    // Session Selector (strictly scoped to the active project)
     const convSel = $('#select-conversation');
     const convs = telemetry.conversations || [];
     convSel.innerHTML = convs.length
       ? convs
           .map(
             (c) =>
-              `<option value="${escapeHtml(c.id)}" ${c.id === activeConv?.id ? 'selected' : ''}>[${escapeHtml(c.workspace)}] ${escapeHtml(c.title)}</option>`,
+              `<option value="${escapeHtml(c.id)}" ${c.id === activeConv?.id ? 'selected' : ''}>${escapeHtml(c.title)}</option>`,
           )
           .join('')
-      : `<option value="">暂无匹配会话</option>`;
+      : `<option value="">该项目暂无会话</option>`;
 
     const statusPill = $('#active-status-pill');
     statusPill.textContent = activeConv?.statusLabel || '就绪';
     statusPill.classList.toggle('running', Boolean(activeConv?.isRunning));
 
-    // 1. Context Ring
+    // ========== WINDOW 1: UNIFIED PROJECT & SESSION STATS ==========
+    const st = telemetry.stats;
+    const scope = st.scope || 'project';
+    const dataBlock = scope === 'session' ? st.session : scope === 'all' ? st.all : st.project;
+
+    document.querySelectorAll('#stats-scope-group .seg-btn').forEach((b) => {
+      b.classList.toggle('active', b.dataset.scope === scope);
+    });
+    document.querySelectorAll('#stats-range-group .seg-btn').forEach((b) => {
+      b.classList.toggle('active', b.dataset.range === st.range);
+    });
+
+    $('#stats-total-tokens').textContent = formatNumber(dataBlock.totalTokens);
+    $('#stats-total-cost').textContent = `≈ $${dataBlock.costUsd.toFixed(2)}`;
+    $('#stats-cache-rate').textContent = `缓存 ${dataBlock.cacheHitRate.toFixed(1)}%`;
+    $('#sum-cache').textContent = formatCompact(dataBlock.cacheRead);
+    $('#sum-uncached').textContent = formatCompact(dataBlock.uncachedInput);
+    $('#sum-output').textContent = formatCompact(dataBlock.output);
+
+    $('#wrap-include-cli').style.display = scope === 'session' ? 'none' : 'inline-flex';
+    $('#chk-include-cli').checked = Boolean(st.includeCliInProject);
+
+    if (scope === 'session') {
+      $('#stats-scope-caption').textContent = `仅统计当前会话：${activeConv?.title || '—'}`;
+    } else if (scope === 'all') {
+      $('#stats-scope-caption').textContent = `汇总左侧全部 ${projects.length} 个项目`;
+    } else {
+      const pInfo = st.project;
+      $('#stats-scope-caption').textContent = `项目「${pInfo.name}」· ${pInfo.sessionCount} 会话${pInfo.cliCount ? ` · ${pInfo.cliCount} CLI` : ''}`;
+    }
+
+    const models = dataBlock.models || [];
+    if (models.length) {
+      $('#stats-ratio-bar').innerHTML = models
+        .map(
+          (m) =>
+            `<span style="width:${Math.max(2, m.sharePercent)}%;background:${m.color}" title="${escapeHtml(m.displayName)} ${m.sharePercent}%"></span>`,
+        )
+        .join('');
+      $('#stats-models-list').innerHTML = models
+        .map((m) => {
+          const tot = Math.max(1, m.totalTokens);
+          const wCache = (m.cacheRead / tot) * 100;
+          const wIn = (m.uncachedInput / tot) * 100;
+          const wOut = (m.output / tot) * 100;
+          return `
+            <div class="model-row">
+              <div class="model-row-top">
+                <div class="model-name-wrap">
+                  <span class="ratio-swatch" style="background:${m.color}"></span>
+                  <span class="model-row-name">${escapeHtml(m.displayName)}</span>
+                </div>
+                <span class="model-row-nums tabular"><strong>${m.sharePercent.toFixed(1)}%</strong> · ${formatCompact(m.totalTokens)}</span>
+              </div>
+              <div class="stacked-bar">
+                <span style="width:${wCache}%;background:var(--prism-tertiary)"></span>
+                <span style="width:${wIn}%;background:var(--prism-accent)"></span>
+                <span style="width:${wOut}%;background:var(--prism-secondary)"></span>
+              </div>
+              <div class="model-row-sub tabular">
+                <span>缓存命中 ${m.cacheHitRate.toFixed(1)}% · ${m.turns} 轮</span>
+                <span>输出 ${formatCompact(m.output)} · ≈$${m.costUsd.toFixed(2)}</span>
+              </div>
+            </div>
+          `;
+        })
+        .join('');
+    } else {
+      $('#stats-ratio-bar').innerHTML = '';
+      $('#stats-models-list').innerHTML = `<div class="model-row"><div class="card-sub">该时间范围内暂无模型 Token 记录</div></div>`;
+    }
+
+    // All-projects comparison strip
+    const allStrip = $('#all-projects-strip');
+    if (scope === 'all' && projects.length > 0) {
+      allStrip.hidden = false;
+      allStrip.innerHTML = projects
+        .map(
+          (p) => `
+          <div class="proj-mini-chip ${p.id === telemetry.activeProjectId ? 'active' : ''}" data-pick-project-id="${escapeHtml(p.id)}">
+            <div class="proj-mini-name">${escapeHtml(p.name)}</div>
+            <div class="proj-mini-val tabular">${formatCompact(p.totalTokens)} · 缓存 ${p.cacheHitRate.toFixed(0)}%</div>
+          </div>
+        `,
+        )
+        .join('');
+    } else {
+      allStrip.hidden = true;
+    }
+
+    // ========== WINDOW 2: STANDALONE REAL-TIME CONTEXT ==========
     const ctx = telemetry.context;
     const circumference = 2 * Math.PI * 48;
     const offset = circumference * (1 - Math.min(100, ctx.percent) / 100);
@@ -424,7 +496,7 @@
     $('#ring-percent').textContent = `${ctx.percent.toFixed(ctx.percent >= 10 ? 0 : 1)}%`;
     $('#ctx-used').textContent = formatNumber(ctx.used);
     $('#ctx-limit').textContent = formatNumber(ctx.limit);
-    $('#context-subtitle').textContent = `${activeConv?.workspace || '工作区'} · ${activeConv?.title || '当前会话'}`;
+    $('#context-subtitle').textContent = `${activeConv?.projectName || '项目'} · ${activeConv?.title || '当前会话'}`;
 
     document.querySelectorAll('#window-limit-group .seg-btn').forEach((b) => {
       b.classList.toggle('active', Number(b.dataset.limit) === Number(ctx.limit));
@@ -452,176 +524,60 @@
       })
       .join('');
 
-    // Per-session model ratio (strictly this conversation unless user opts into subagents!)
-    const sm = telemetry.sessionModels;
-    $('#session-total-badge').textContent = `${formatCompact(sm.totalTokens)} · ≈$${sm.costUsd.toFixed(2)}`;
-    $('#chk-include-subagents').checked = Boolean(sm.includeSubagents);
-    $('#label-include-sub').textContent = `含子智能体 (${sm.subagentCount || 0})`;
-    $('#wrap-include-sub').style.display = sm.subagentCount > 0 ? 'inline-flex' : 'none';
-
-    if (sm.models.length > 0) {
-      $('#session-ratio-bar').innerHTML = sm.models
-        .map((m) => `<span style="width:${Math.max(2, m.sharePercent)}%;background:${m.color}" title="${escapeHtml(m.displayName)} ${m.sharePercent}%"></span>`)
-        .join('');
-      $('#session-models-list').innerHTML = sm.models
-        .map(
-          (m) => `
-          <div class="ratio-row tabular">
-            <div class="ratio-row-left">
-              <span class="ratio-swatch" style="background:${m.color}"></span>
-              <span class="ratio-name">${escapeHtml(m.displayName)}</span>
-            </div>
-            <div class="ratio-row-right">
-              <strong>${m.sharePercent.toFixed(1)}%</strong> · ${formatCompact(m.totalTokens)} · 缓存 ${m.cacheHitRate.toFixed(0)}%
-            </div>
-          </div>
-        `,
-        )
-        .join('');
-    } else {
-      $('#session-ratio-bar').innerHTML = '';
-      $('#session-models-list').innerHTML = `<div class="card-sub">该会话暂无模型 Token 记录</div>`;
-    }
-
-    // 2. Quota Rolling Windows (5h & Weekly for Gemini + Claude/GPT)
-    const q = telemetry.quotas;
-    const renderQuotaCard = (group, accentColor) => {
-      const renderWin = (title, win) => {
-        const pctLeft = win.remainingPercent;
-        const barColor = pctLeft < 15 ? '#f87171' : pctLeft < 35 ? 'var(--prism-secondary)' : accentColor;
-        return `
-          <div class="quota-row">
-            <div class="quota-row-top tabular">
-              <span class="muted">${title}</span>
-              <span class="quota-val">${formatCompact(win.tokens)} <span class="muted">(${pctLeft.toFixed(0)}% 余)</span></span>
-            </div>
-            <div class="quota-bar"><span style="width:${Math.min(100, win.usedPercent)}%;background:${barColor}"></span></div>
-            <div class="quota-reset tabular">
-              <span>${win.calls} 次调用</span>
-              <span>${formatCountdown(win.resetInMs)}</span>
-            </div>
-          </div>
-        `;
-      };
-      return `
-        <div class="quota-box">
-          <div class="quota-head">
-            <span>${group.label}</span>
-            <span class="muted tabular" style="font-size:10px">5h / 7d</span>
-          </div>
-          ${renderWin('5小时窗口', group.h5)}
-          ${renderWin('每周窗口', group.d7)}
-        </div>
-      `;
-    };
-
-    $('#quota-grid').innerHTML =
-      renderQuotaCard(q.gemini, 'var(--prism-accent)') +
-      renderQuotaCard(q.claude, 'var(--prism-tertiary)');
-
-    // Speed & Cache strip
-    const spd = telemetry.speed;
-    $('#metric-cache-rate').textContent = `${sm.cacheHitRate.toFixed(1)}%`;
+    const spd = ctx.speed;
+    $('#ctx-model-badge').textContent = spd.model || '—';
+    $('#ctx-effort-badge').textContent = spd.effort || '—';
     $('#metric-speed').textContent = spd.latest ? spd.latest.toFixed(1) : '—';
-    $('#metric-speed-avg').textContent = spd.average ? `均值 ${spd.average.toFixed(1)} tok/s · ${spd.turnCount} 轮` : `${spd.turnCount} 轮`;
-    $('#last-model-badge').textContent = spd.lastModelDisplay || '未检测到模型';
     renderSparkline(spd.sparkline);
 
-    // 3. Subagent Live Monitor
-    document.querySelectorAll('#subagent-scope-group .seg-btn').forEach((btn) => {
-      btn.classList.toggle('active', btn.dataset.subscope === subagentScope);
-    });
+    // ========== WINDOW 3: ACTIVE CLI & SUBAGENT LIVE MONITOR ==========
+    const ag = telemetry.activeAgents;
+    const badge = $('#active-agents-badge');
+    badge.textContent = ag.runningCount > 0 ? `${ag.runningCount} 运行中` : `${ag.items.length} 活动中`;
+    badge.className = `badge-pill ${ag.runningCount > 0 ? 'running' : ''}`;
 
-    const allSubs = telemetry.subagents || [];
-    const targetWs = projectFilter || activeConv?.workspace || '';
-    const visibleSubs = subagentScope === 'current' && targetWs
-      ? allSubs.filter((s) => s.workspace === targetWs)
-      : allSubs;
-
-    const runningSubs = visibleSubs.filter((s) => s.isRunning).length;
-    const aliveSubs = visibleSubs.filter((s) => s.status === 'alive').length;
-    $('#subagent-count-badge').textContent = runningSubs > 0
-      ? `${runningSubs} 运行中 / 共 ${visibleSubs.length}`
-      : aliveSubs > 0
-      ? `${aliveSubs} 待命 / 共 ${visibleSubs.length}`
-      : `共 ${visibleSubs.length} 个`;
-    $('#subagent-count-badge').className = `badge-pill ${runningSubs > 0 ? 'running' : aliveSubs > 0 ? 'alive' : ''}`;
-
-    const subsEl = $('#subagents-list');
-    if (!visibleSubs.length) {
-      subsEl.innerHTML = `<div class="card-sub">当前范围内暂无子智能体记录</div>`;
+    const recentBtn = $('#btn-toggle-recent-agents');
+    if (ag.showRecent) {
+      recentBtn.textContent = '仅看活动中';
     } else {
-      subsEl.innerHTML = visibleSubs
-        .slice(0, 10)
-        .map(
-          (s) => `
-          <div class="sub-item" data-jump-sub="${escapeHtml(s.id)}">
-            <div class="sub-top">
-              <span class="sub-role">${escapeHtml(s.role)}</span>
-              <span class="badge-pill ${s.status === 'running' ? 'running' : s.status === 'alive' ? 'alive' : ''}">${s.statusLabel}</span>
-            </div>
-            <div class="sub-meta tabular">
-              <span class="sub-tags">
-                <span class="type-tag">${escapeHtml(s.typeName)}</span>
-                <span>${escapeHtml(s.workspace)} · ${escapeHtml(s.parentTitle)}</span>
-              </span>
-              <span>${s.stepCount} 步 · ${formatCompact(s.totalTokens)} · ${formatRelativeTime(s.lastActiveMs)}</span>
-            </div>
-          </div>
-        `,
-        )
-        .join('');
+      recentBtn.textContent = `近期 1h (${ag.recentHiddenCount})`;
     }
 
-    // 4. Project-Level Overall Statistics & Model Breakdown
-    const ov = telemetry.overallUsage;
-    $('#overall-total-tokens').textContent = formatNumber(ov.totalTokens);
-    $('#overall-total-cost').textContent = `≈ $${ov.costUsd.toFixed(2)} 参考`;
-    $('#sum-cache').textContent = formatCompact(ov.cacheRead);
-    $('#sum-uncached').textContent = formatCompact(ov.uncachedInput);
-    $('#sum-output').textContent = formatCompact(ov.output);
-
-    document.querySelectorAll('#usage-range-group .seg-btn').forEach((btn) => {
-      btn.classList.toggle('active', btn.dataset.range === ov.range);
-    });
-
-    const projs = telemetry.projects || [];
-    const projEl = $('#projects-list');
-    if (!projs.length) {
-      projEl.innerHTML = `<div class="card-sub">当前时间范围内暂无项目 Token 统计</div>`;
+    const listEl = $('#agents-list');
+    if (!ag.items.length) {
+      listEl.innerHTML = `
+        <div class="empty-agents">
+          当前暂无正在运行的 CLI 或子智能体${ag.recentHiddenCount > 0 ? `（可点右上角查看近期 1h 的 ${ag.recentHiddenCount} 个记录）` : ''}
+        </div>
+      `;
     } else {
-      projEl.innerHTML = projs
-        .map((p) => {
-          const isCur = p.isCurrentProject || p.name === projectFilter;
-          const ratioSegs = p.models
-            .map((m) => `<span style="width:${Math.max(2, m.sharePercent)}%;background:${m.color}" title="${escapeHtml(m.displayName)} ${m.sharePercent}%"></span>`)
-            .join('');
-          const legend = p.models
-            .slice(0, 4)
-            .map(
-              (m) => `
-              <span>
-                <i class="ratio-swatch" style="background:${m.color}"></i>
-                ${escapeHtml(m.displayName.replace(/^gemini-/, 'g-'))} <strong>${m.sharePercent.toFixed(0)}%</strong>
-              </span>
-            `,
-            )
-            .join('');
+      listEl.innerHTML = ag.items
+        .map((a) => {
+          const isCodex = a.kind === 'codex-cli';
+          const clickAttr = a.clickableConvId ? `data-jump-agent="${escapeHtml(a.clickableConvId)}"` : '';
           return `
-            <div class="proj-card ${isCur ? 'is-current' : ''}" data-pick-project="${escapeHtml(p.name)}">
-              <div class="proj-head">
-                <span class="proj-name">
-                  <span>${escapeHtml(p.name)}</span>
-                  ${p.runningCount > 0 ? `<span class="badge-pill running">${p.runningCount} 运行中</span>` : ''}
-                </span>
-                <span class="proj-nums tabular"><strong>${formatCompact(p.totalTokens)}</strong> · ≈$${p.costUsd.toFixed(2)}</span>
+            <div class="agent-card ${a.isRunning ? 'is-running' : ''} ${a.clickableConvId ? 'clickable' : ''}" ${clickAttr}>
+              <div class="agent-top">
+                <div class="agent-id-group">
+                  <span class="source-tag ${isCodex ? 'codex' : ''}">${escapeHtml(a.kindLabel)}</span>
+                  <span class="agent-action">${escapeHtml(a.activity)}</span>
+                </div>
+                <span class="badge-pill ${a.isRunning ? 'running' : ''}">${escapeHtml(a.projectName)} · ${formatRelativeTime(a.lastActiveMs)}</span>
               </div>
-              <div class="proj-sub tabular">
-                <span>${p.sessionCount} 主会话 · ${p.subagentCount} 子智能体</span>
-                <span>缓存命中 ${p.cacheHitRate.toFixed(1)}%</span>
+              <div class="agent-metrics-grid tabular">
+                <div class="agent-kv">
+                  <span>当前模型</span>
+                  <strong>${escapeHtml(a.model)}</strong>
+                </div>
+                <div class="agent-kv">
+                  <span>思考强度</span>
+                  <strong>${escapeHtml(a.effort)}</strong>
+                </div>
+                <div class="agent-kv">
+                  <span>Token 消耗</span>
+                  <strong>${formatCompact(a.totalTokens)} (${a.cacheHitRate}% 缓)</strong>
+                </div>
               </div>
-              <div class="ratio-bar" style="margin-bottom:4px">${ratioSegs}</div>
-              <div class="proj-models-inline tabular">${legend}</div>
             </div>
           `;
         })
@@ -641,31 +597,35 @@
     if (!appState) return;
     const tel = appState.settings.telemetry || {};
     const follow = tel.followLatest !== false;
-    // Always re-read window.sidecar.conversationId in case host updated it
     const liveHostConv = window.sidecar?.conversationId || hostConversationId || '';
     if (liveHostConv) hostConversationId = liveHostConv;
 
     const params = new URLSearchParams({
       followLatest: String(follow),
+      statsScope: tel.statsScope || 'project',
       range: tel.range || 'today',
       windowLimit: String(tel.windowLimit || 512000),
-      includeSubagents: String(includeSubagents),
+      includeCliInProject: String(tel.includeCliInProject !== false),
+      showRecentAgents: String(Boolean(tel.showRecentAgents)),
     });
     if (hostConversationId) params.set('hostConversationId', hostConversationId);
     if (activeWorkspaceUri) params.set('activeWorkspaceUri', activeWorkspaceUri);
-    if (projectFilter) params.set('projectFilter', projectFilter);
+    if (!follow && selectedProjectId) params.set('selectedProjectId', selectedProjectId);
     if (!follow && manualConversationId) params.set('conversationId', manualConversationId);
 
     const res = await apiFetch(`/api/telemetry?${params.toString()}`, { method: 'GET' });
     if (!res.ok) return;
     telemetry = await res.json();
+    if (follow) {
+      selectedProjectId = telemetry.activeProjectId || '';
+    }
     renderCockpit();
   }
 
   async function toggleCompanion() {
     const isRunning = Boolean(appState?.companion?.running && appState?.settings?.companion?.enabled);
     const action = isRunning ? 'stop' : 'start';
-    showToast(action === 'start' ? '正在开启星光滤色整窗伴侣...' : '正在关闭整窗伴侣...');
+    showToast(action === 'start' ? '正在开启星光滤色整窗氛围...' : '正在关闭整窗氛围...');
     const res = await apiFetch('/api/companion', {
       method: 'POST',
       body: JSON.stringify({ action }),
@@ -679,65 +639,41 @@
 
   // ==================== EVENT BINDINGS ====================
   function bindEvents() {
-    document.querySelectorAll('.nav-tab').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const target = btn.dataset.tab;
-        document.querySelectorAll('.nav-tab').forEach((b) => {
-          b.classList.toggle('active', b === btn);
-          b.setAttribute('aria-selected', String(b === btn));
-        });
-        document.querySelectorAll('.tab-panel').forEach((p) => {
-          p.classList.toggle('active', p.id === `tab-${target}`);
-        });
-      });
+    $('#btn-page-toggle').addEventListener('click', () => {
+      setPage(currentPage === 'cockpit' ? 'studio' : 'cockpit');
     });
-
-    $('#btn-top-companion').addEventListener('click', toggleCompanion);
-    $('#btn-toggle-companion').addEventListener('click', toggleCompanion);
 
     $('#btn-refresh').addEventListener('click', async () => {
       await Promise.all([loadState(), loadTelemetry()]);
-      showToast('数据已刷新');
+      showToast('已刷新');
     });
 
-    // Follow toggle
     $('#btn-follow-latest').addEventListener('click', async () => {
       const next = !(appState.settings.telemetry?.followLatest !== false);
       if (next) {
-        projectFilter = '';
+        selectedProjectId = '';
         manualConversationId = '';
       }
       await queueSaveSettings({ telemetry: { followLatest: next } }, true);
       await loadTelemetry();
-      showToast(next ? '已开启自动跟随当前会话' : '已切换为手动查看模式');
+      showToast(next ? '已跟随当前会话与项目' : '已切为手动选择');
     });
 
-    // Project switcher
+    // Topbar Project selector
     $('#select-project').addEventListener('change', async (e) => {
-      projectFilter = e.target.value;
-      if (projectFilter) {
-        await queueSaveSettings({ telemetry: { followLatest: false } }, true);
-        await loadTelemetry();
-        const firstConv = telemetry?.conversations?.[0];
-        if (firstConv) {
-          manualConversationId = firstConv.id;
-          await loadTelemetry();
-        }
-      } else {
-        manualConversationId = '';
-        await queueSaveSettings({ telemetry: { followLatest: true } }, true);
-        await loadTelemetry();
-      }
+      selectedProjectId = e.target.value;
+      manualConversationId = '';
+      await queueSaveSettings({ telemetry: { followLatest: false } }, true);
+      await loadTelemetry();
     });
 
-    // Conversation switcher
+    // Conversation selector
     $('#select-conversation').addEventListener('change', async (e) => {
       manualConversationId = e.target.value;
       await queueSaveSettings({ telemetry: { followLatest: false } }, true);
       await loadTelemetry();
     });
 
-    // Jump to selected conversation in Antigravity main window
     $('#btn-jump-conv').addEventListener('click', () => {
       const targetId = $('#select-conversation').value || telemetry?.activeConversation?.id;
       if (targetId && window.sidecar?.ui?.toggleConversation) {
@@ -746,12 +682,36 @@
       }
     });
 
-    // Include subagents toggle in current session ratio
-    $('#chk-include-subagents').addEventListener('change', async (e) => {
-      includeSubagents = e.target.checked;
+    // Window 1 controls
+    $('#stats-scope-group').addEventListener('click', async (e) => {
+      const btn = e.target.closest('.seg-btn');
+      if (!btn) return;
+      await queueSaveSettings({ telemetry: { statsScope: btn.dataset.scope } }, true);
       await loadTelemetry();
     });
 
+    $('#stats-range-group').addEventListener('click', async (e) => {
+      const btn = e.target.closest('.seg-btn');
+      if (!btn) return;
+      await queueSaveSettings({ telemetry: { range: btn.dataset.range } }, true);
+      await loadTelemetry();
+    });
+
+    $('#chk-include-cli').addEventListener('change', async (e) => {
+      await queueSaveSettings({ telemetry: { includeCliInProject: e.target.checked } }, true);
+      await loadTelemetry();
+    });
+
+    $('#all-projects-strip').addEventListener('click', async (e) => {
+      const chip = e.target.closest('[data-pick-project-id]');
+      if (!chip) return;
+      selectedProjectId = chip.dataset.pickProjectId;
+      manualConversationId = '';
+      await queueSaveSettings({ telemetry: { followLatest: false, statsScope: 'project' } }, true);
+      await loadTelemetry();
+    });
+
+    // Window 2 controls
     $('#window-limit-group').addEventListener('click', async (e) => {
       const btn = e.target.closest('.seg-btn');
       if (!btn) return;
@@ -759,75 +719,26 @@
       await loadTelemetry();
     });
 
-    // Quota budget editor
-    $('#btn-quota-settings').addEventListener('click', () => {
-      const box = $('#quota-budget-editor');
-      box.hidden = !box.hidden;
-    });
-
-    $('#btn-save-budgets').addEventListener('click', async () => {
-      const g5h = Math.max(1, Number($('#inp-g5h').value) || 60) * 1_000_000;
-      const g7d = Math.max(10, Number($('#inp-g7d').value) || 500) * 1_000_000;
-      const c5h = Math.max(1, Number($('#inp-c5h').value) || 15) * 1_000_000;
-      const c7d = Math.max(10, Number($('#inp-c7d').value) || 120) * 1_000_000;
-      await queueSaveSettings({ quotaBudgets: { gemini5h: g5h, gemini7d: g7d, claude5h: c5h, claude7d: c7d } }, true);
-      $('#quota-budget-editor').hidden = true;
-      await loadTelemetry();
-      showToast('已更新参考额度上限');
-    });
-
-    // Subagent scope & click jump
-    $('#subagent-scope-group').addEventListener('click', (e) => {
-      const btn = e.target.closest('.seg-btn');
-      if (!btn) return;
-      subagentScope = btn.dataset.subscope;
-      renderCockpit();
-    });
-
-    $('#subagents-list').addEventListener('click', async (e) => {
-      const item = e.target.closest('[data-jump-sub]');
-      if (!item) return;
-      const subId = item.dataset.jumpSub;
-      if (window.sidecar?.ui?.toggleConversation) {
-        window.sidecar.ui.toggleConversation(subId);
-        showToast('已打开该子智能体对话');
-      }
-      manualConversationId = subId;
-      await queueSaveSettings({ telemetry: { followLatest: false } }, true);
+    // Window 3 controls
+    $('#btn-toggle-recent-agents').addEventListener('click', async () => {
+      const next = !Boolean(appState.settings.telemetry?.showRecentAgents);
+      await queueSaveSettings({ telemetry: { showRecentAgents: next } }, true);
       await loadTelemetry();
     });
 
-    // Project overall stats time range & click filter
-    $('#usage-range-group').addEventListener('click', async (e) => {
-      const btn = e.target.closest('.seg-btn');
-      if (!btn) return;
-      await queueSaveSettings({ telemetry: { range: btn.dataset.range } }, true);
-      await loadTelemetry();
-    });
-
-    $('#projects-list').addEventListener('click', async (e) => {
-      const card = e.target.closest('[data-pick-project]');
+    $('#agents-list').addEventListener('click', async (e) => {
+      const card = e.target.closest('[data-jump-agent]');
       if (!card) return;
-      const name = card.dataset.pickProject;
-      projectFilter = projectFilter === name ? '' : name;
-      if (projectFilter) {
-        await queueSaveSettings({ telemetry: { followLatest: false } }, true);
-        await loadTelemetry();
-        const firstConv = telemetry?.conversations?.[0];
-        if (firstConv) {
-          manualConversationId = firstConv.id;
-          await loadTelemetry();
-        }
-        showToast(`已切换至项目「${projectFilter}」`);
-      } else {
-        manualConversationId = '';
-        await queueSaveSettings({ telemetry: { followLatest: true } }, true);
-        await loadTelemetry();
-        showToast('已恢复查看全部项目');
+      const cid = card.dataset.jumpAgent;
+      if (cid && window.sidecar?.ui?.toggleConversation) {
+        window.sidecar.ui.toggleConversation(cid);
+        showToast('已打开该子智能体');
       }
     });
 
     // Studio bindings
+    $('#btn-toggle-companion').addEventListener('click', toggleCompanion);
+
     $('#btn-follow-host').addEventListener('click', () => {
       queueSaveSettings({ followHostTheme: !appState.settings.followHostTheme }, true);
     });
@@ -999,6 +910,7 @@
   }
 
   async function init() {
+    setPage('cockpit');
     bindEvents();
     if (window.sidecar?.getWorkspaceUris) {
       try {
@@ -1010,7 +922,7 @@
     }
     await loadState();
     await loadTelemetry();
-    setInterval(loadTelemetry, 3500);
+    setInterval(loadTelemetry, 3000);
   }
 
   init().catch((err) => {
