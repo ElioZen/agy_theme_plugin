@@ -228,12 +228,19 @@ function readCodexOfficialQuota(nowMs) {
     const expired = raw.resetAtMs > 0 && nowMs >= raw.resetAtMs;
     const remainingPct = expired ? 100 : raw.remainingPct;
     const usedPct = expired ? 0 : raw.usedPct;
+    const windowMs =
+      raw.windowMinutes > 0
+        ? raw.windowMinutes * 60 * 1000
+        : raw.kind === 'h5'
+        ? 5 * 60 * 60 * 1000
+        : 7 * 24 * 60 * 60 * 1000;
     const base = {
       key: raw.key,
       remainingPct,
       usedPct,
       resetAtMs: expired ? 0 : raw.resetAtMs,
       resetInMs: expired ? 0 : Math.max(0, raw.resetAtMs - nowMs),
+      windowMs,
     };
     return attachBurnMetrics(base, historyByKey[raw.key] || [], nowMs);
   };
@@ -283,23 +290,42 @@ function attachBurnMetrics(bucket, rawHistory, nowMs) {
   let burnPctPerHour = 0;
   let etaMs = 0;
   let willExhaustBeforeReset = false;
+  let burnSource = '';
 
+  // Layer 1: Live recent consumption velocity from ring-buffer samples (last 2.5h)
   if (anchor && nowMs - anchor.ts >= MIN_SPAN_MS) {
     const dropped = anchor.remainingPct - bucket.remainingPct;
     if (dropped >= 0.3) {
       const hours = (nowMs - anchor.ts) / (60 * 60 * 1000);
       burnPctPerHour = Math.round((dropped / hours) * 10) / 10;
-      if (burnPctPerHour >= 0.2 && bucket.remainingPct > 0) {
-        etaMs = Math.round((bucket.remainingPct / burnPctPerHour) * 60 * 60 * 1000);
-        willExhaustBeforeReset = Boolean(bucket.resetInMs > 0 && etaMs < bucket.resetInMs);
+      burnSource = 'recent';
+    }
+  }
+
+  // Layer 2: Official cycle-average pace fallback (usedPct / elapsedInCycle)
+  // Gives instant, accurate burn & depletion ETA even right after startup or between bursts!
+  if (burnPctPerHour < 0.1 && bucket.usedPct >= 0.5 && bucket.windowMs > 0 && bucket.resetInMs > 0) {
+    const elapsedMs = bucket.windowMs - bucket.resetInMs;
+    if (elapsedMs >= 5 * 60 * 1000 && elapsedMs <= bucket.windowMs) {
+      const elapsedHours = elapsedMs / (60 * 60 * 1000);
+      const rate = bucket.usedPct / elapsedHours;
+      if (rate >= 0.1) {
+        burnPctPerHour = Math.round(rate * 10) / 10;
+        burnSource = 'cycle';
       }
     }
+  }
+
+  if (burnPctPerHour >= 0.1 && bucket.remainingPct > 0) {
+    etaMs = Math.round((bucket.remainingPct / burnPctPerHour) * 60 * 60 * 1000);
+    willExhaustBeforeReset = Boolean(bucket.resetInMs > 0 && etaMs < bucket.resetInMs);
   }
 
   return {
     ...bucket,
     alertLevel,
     burnPctPerHour,
+    burnSource,
     etaMs,
     willExhaustBeforeReset,
   };
@@ -513,6 +539,11 @@ export class AgyQuotaFetcher {
       const expired = finalResetAtMs > 0 && nowMs >= finalResetAtMs;
       const remainingPct = expired ? 100 : Math.max(0, Math.min(100, Math.round(frac * 1000) / 10));
       const usedPct = Math.max(0, Math.round((100 - remainingPct) * 10) / 10);
+      const windowMs = key.includes('5h')
+        ? 5 * 60 * 60 * 1000
+        : key.includes('weekly')
+        ? 7 * 24 * 60 * 60 * 1000
+        : 0;
       return attachBurnMetrics(
         {
           key,
@@ -520,6 +551,7 @@ export class AgyQuotaFetcher {
           usedPct,
           resetAtMs: expired ? 0 : finalResetAtMs,
           resetInMs: expired ? 0 : Math.max(0, finalResetAtMs - nowMs),
+          windowMs,
         },
         this.#history[key] || [],
         nowMs,

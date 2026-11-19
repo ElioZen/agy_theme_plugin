@@ -775,8 +775,8 @@
         ? formatCountdown(bucket.resetInMs)
         : '—';
       const burnLine =
-        hasVal && bucket.burnPctPerHour >= 0.2
-          ? bucket.willExhaustBeforeReset
+        hasVal && bucket.burnPctPerHour >= 0.1
+          ? bucket.etaMs > 0
             ? `-${bucket.burnPctPerHour.toFixed(1)}%/h · 预计 ${formatDurationShort(bucket.etaMs)} 耗尽`
             : `-${bucket.burnPctPerHour.toFixed(1)}%/h`
           : '';
