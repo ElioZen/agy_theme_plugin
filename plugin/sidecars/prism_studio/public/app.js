@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_VERSION = '3.5.2';
+  const FRONTEND_VERSION = '3.5.3';
   const COLOR_CHANNELS = [
     { key: 'accent', label: '主强调色' },
     { key: 'secondary', label: '次折射色' },
@@ -1202,6 +1202,7 @@
                   </div>
                   <span class="badge-pill ${pillCls}">${escapeHtml(a.projectName)} · ${statusSuffix}</span>
                 </div>
+                ${a.taskTitle ? `<div class="agent-task-title" title="${escapeHtml(a.rawTaskTitle || a.taskTitle)}">${escapeHtml(a.taskTitle)}</div>` : ''}
                 ${a.actionDetail ? `<div class="agent-cmd-line" title="${escapeHtml(a.actionDetail)}">${escapeHtml(a.actionDetail)}</div>` : ''}
                 <div class="agent-metrics-grid tabular">
                   <div class="agent-kv">

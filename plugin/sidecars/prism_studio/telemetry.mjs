@@ -258,6 +258,164 @@ function summarizeToolCallDetail(toolName, rawArgs) {
   return '';
 }
 
+const ZH_TASK_PHRASES = [
+  [/\bFull[- ]Stack Kernel Architecture Mapper\b/gi, '全栈内核架构梳理'],
+  [/\bPrototype Out[- ]of[- ]Factory QA Agent\b/gi, '原型出厂验收测试'],
+  [/\bOut[- ]of[- ]Factory QA Agent\b/gi, '出厂验收测试'],
+  [/\bDocumentation\s*&\s*Conflict Auditor\b/gi, '文档与冲突审计'],
+  [/\bDefect\s*&\s*Edge[- ]Case Finisher\b/gi, '缺陷与边界收口'],
+  [/\bFrontend Finisher Agent\b/gi, '前端收口实现'],
+  [/\bBackend Finisher Agent\b/gi, '后端收口实现'],
+  [/\bCanvas\s*&\s*Toolbox Polish Agent\b/gi, '画布与工具栏打磨'],
+  [/\bCodebase Researcher\b/gi, '代码库调研'],
+  [/\bDatabase Debugger\b/gi, '数据库排查'],
+  [/\bWallpaper Artist\b/gi, '壁纸生成'],
+  [/\bUI Designer\b/gi, '界面设计'],
+  [/\bFormal Frontend Review Fixes\s*&\s*Strict Grid Alignment\b/gi, '正式前端评审修复与网格严格对齐'],
+  [/\bFormal Frontend\b/gi, '正式前端'],
+  [/\bFormal Backend\b/gi, '正式后端'],
+  [/\bBackend Kernel\b/gi, '后端内核'],
+  [/\bFrontend Kernel\b/gi, '前端内核'],
+  [/\bInteractive Prototype\b/gi, '交互原型'],
+  [/\bGlobal Filter Bar\b/gi, '全局条件栏'],
+  [/\bCondition Drag[- ]to[- ]Reorder\b/gi, '条件拖拽排序'],
+  [/\bReview Fixes\b/gi, '评审修复'],
+  [/\bStrict Grid Alignment\b/gi, '网格严格对齐'],
+  [/\bIndependent new read-only review\b/gi, '独立只读代码评审'],
+  [/\bread-only review\b/gi, '只读代码评审'],
+  [/\bproject rules\b/gi, '项目规范'],
+  [/\bcomponent POST exports? routes?\b/gi, '组件 POST 导出接口'],
+  [/\bJSON body\b/gi, 'JSON 请求体'],
+  [/\bsurface prep\b/gi, '视图准备'],
+  [/\ball DuckDB reads?\b/gi, '全部 DuckDB 读取'],
+  [/\bDuckDB reads?\b/gi, 'DuckDB 读取'],
+  [/\bquery and response work\b/gi, '查询与响应开发'],
+  [/\bquery and response\b/gi, '查询与响应'],
+  [/\bexport persistence\b/gi, '导出持久化'],
+  [/\bpersonal center\b/gi, '个人导出中心'],
+  [/\bre-authorization\b/gi, '重新鉴权'],
+  [/\blayered retention\b/gi, '分层保留'],
+  [/\breference tracking\b/gi, '引用追踪'],
+  [/\bfull-scope totals\b/gi, '全量总计'],
+  [/\bsparkline\b/gi, '迷你趋势'],
+  [/\bdefinition\b/gi, '定义'],
+  [/\bvalidation\b/gi, '校验'],
+  [/\bpackaging\b/gi, '打包'],
+  [/\bpersistence\b/gi, '持久化'],
+  [/\bservice\b/gi, '服务'],
+  [/\bexport routes?\b/gi, '导出接口'],
+  [/\bunit tests?\b/gi, '单元测试'],
+  [/\bintegration tests?\b/gi, '集成测试'],
+  [/\bYou are implementing(?: the)?(?: Coordinator-approved)?\b/gi, '实现'],
+  [/\bYou are building(?: the)?\b/gi, '构建'],
+  [/\bYou are fixing(?: the)?\b/gi, '修复'],
+  [/\bYou are auditing(?: the)?\b/gi, '审计'],
+  [/\bYou are reviewing(?: the)?\b/gi, '评审'],
+  [/\bYou are refactoring(?: the)?\b/gi, '重构'],
+  [/\bYou are testing(?: the)?\b/gi, '测试'],
+  [/\bOwn all\b/gi, '负责全部'],
+  [/\bOwn\b/g, '负责'],
+  [/\bImplement(?:ing)?\b/gi, '实现'],
+  [/\bBuild(?:ing)?\b/gi, '构建'],
+  [/\bFix(?:ing)?\b/gi, '修复'],
+  [/\bAudit(?:or|ing)?\b/gi, '审计'],
+  [/\bPolish\b/gi, '打磨'],
+  [/\bFrontend\b/gi, '前端'],
+  [/\bBackend\b/gi, '后端'],
+  [/\bPrototype\b/gi, '原型'],
+  [/\bArchitecture\b/gi, '架构'],
+  [/\bDocumentation\b/gi, '文档'],
+  [/\bRefactor(?:ing)?\b/gi, '重构'],
+  [/\bMigration\b/gi, '迁移'],
+  [/\bOptimization\b/gi, '优化'],
+  [/\bSubagent\b/gi, '子智能体'],
+  [/\bAgent\b/gi, '智能体'],
+  [/\bWorker\b/gi, '执行节点'],
+  [/\bQA\b/g, '验收测试'],
+  [/\bincl\.?\b/gi, '含'],
+  [/\bper\b/gi, '按'],
+  [/\btheir\b/gi, '对应'],
+  [/\bfor\b/gi, '·'],
+  [/\band\b/gi, '与'],
+  [/\ball\b/gi, '全部'],
+];
+
+function localizeTaskTitleToZh(rawText) {
+  let s = String(rawText || '').trim();
+  if (!s) return '';
+  for (const [re, rep] of ZH_TASK_PHRASES) {
+    s = s.replace(re, rep);
+  }
+  s = s
+    .replace(/[`*#]/g, '')
+    .replace(/\(\s*([^)]+)\s*\)/g, '（$1）')
+    .replace(/\s*,\s*/g, '、')
+    .replace(/\s*·\s*·\s*/g, ' · ')
+    .replace(/\s+/g, ' ')
+    .replace(/^[:：·,\-.\s]+|[:：·,\s]+$/g, '')
+    .trim();
+  return truncateLine(s, 56);
+}
+
+function extractTaskSubjectFromPrompt(promptText) {
+  let clean = String(promptText || '')
+    .replace(/<\/?USER_REQUEST>/gi, ' ')
+    .replace(/<\/?ADDITIONAL_METADATA>[\s\S]*$/gi, ' ')
+    .replace(/\r\n/g, '\n')
+    .trim();
+  if (!clean) return '';
+
+  // 1. Prefer explicit markdown bold task headline within the opening 360 chars (e.g. **P0-3 正式前端 (...)**)
+  const headSlice = clean.slice(0, 380);
+  const boldMatch = /\*\*([^*]{4,140})\*\*/.exec(headSlice);
+  if (boldMatch) {
+    const leadMatch = /^(You are (?:implementing|building|fixing|auditing|reviewing|refactoring|testing)|请[^*]{0,20}?(?:完成|更新|修复|实现))/i.exec(
+      headSlice.trim(),
+    );
+    const verb = leadMatch ? leadMatch[1].replace(/^请[^，。]*?(?=(?:完成|更新|修复|实现))/, '') : '';
+    const inner = boldMatch[1].replace(/[`]/g, '').trim();
+    const combined = verb && !inner.includes(verb) ? `${verb} ${inner}` : inner;
+    return combined;
+  }
+
+  // 2. Strip Codex/worker boilerplate preamble sentences to find the actual task ownership sentence
+  const sentences = clean
+    .replace(/\n+/g, '. ')
+    .split(/(?<=[.。!?！？])\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const boilerplateRe =
+    /^(Independent\s+\w+\s+development\s+session|First\s+cat\b|Do\s+not\b|Root\s+agent\b|This\s+is\s+authorized\b|No\s+subagents\b|Parallel\s+workers\b|Keep\s+each\s+change\b|Read\s+\/|ONLY\s+read)/i;
+  const substantive = sentences.find((s) => s.length >= 6 && !boilerplateRe.test(s));
+  let chosen = substantive || sentences[0] || clean;
+
+  // 3. Strip Chinese stylistic filler prefix (e.g. "请用自然、清晰的中文更新 ...") & strict-scope parentheticals
+  chosen = chosen
+    .replace(/^请(?:用|以)[^，。:\n]{1,28}?中文(?:（[^）]*）|\([^)]*\))?[，,\s]*/u, '')
+    .replace(/（严禁[^）]*）/gu, '')
+    .replace(/\s+in\s+`?\/Users\/[^\s`]+`?\.?$/i, '')
+    .replace(/`[^`]*\/([^/`]+)`/g, '$1')
+    .trim();
+
+  return chosen.slice(0, 140);
+}
+
+function buildChineseTaskTitle({ dbTitle = '', role = '', prompt = '' } = {}) {
+  const cleanDb = String(dbTitle || '').trim();
+  const cleanRole = String(role || '').trim();
+  const extractedPrompt = extractTaskSubjectFromPrompt(prompt);
+
+  const raw = cleanDb || cleanRole || extractedPrompt || '';
+  if (!raw) return { taskTitle: '', rawTaskTitle: '' };
+
+  const taskTitle = localizeTaskTitleToZh(raw);
+  return {
+    taskTitle: taskTitle || truncateLine(raw, 54),
+    rawTaskTitle: truncateLine(raw, 160),
+  };
+}
+
 function parseAgyTranscript(filePath) {
   let stat;
   try {
@@ -289,6 +447,7 @@ function parseAgyTranscript(filePath) {
   let totalSteps = 0;
   let lastObj = null;
   let lastToolDetail = '';
+  let firstUserPrompt = '';
 
   for (const line of text.split('\n')) {
     if (!line.trim()) continue;
@@ -322,7 +481,11 @@ function parseAgyTranscript(filePath) {
     }
 
     if (obj.type === 'USER_INPUT') {
-      userChars += String(obj.content || '').length;
+      const uText = String(obj.content || '');
+      userChars += uText.length;
+      if (!firstUserPrompt && uText.trim()) {
+        firstUserPrompt = uText.slice(0, 1200);
+      }
     } else if (obj.type === 'PLANNER_RESPONSE') {
       const model = String(obj.model || '');
       if (model) lastModel = model;
@@ -451,6 +614,7 @@ function parseAgyTranscript(filePath) {
     activity,
     activityKind,
     lastToolDetail,
+    firstUserPrompt,
     isTurnFinished,
     lastStatus: String(lastObj?.status || ''),
     charWeights: {
@@ -572,6 +736,7 @@ function parseCodexSession(filePath, statInfo) {
   let activity = '运行中';
   let activityKind = 'thinking';
   let lastToolDetail = '';
+  let firstUserPrompt = '';
   let turnCount = 0;
   let prevUsage = null;
   const turns = [];
@@ -583,9 +748,11 @@ function parseCodexSession(filePath, statInfo) {
     const line = lines[i];
     if (!line || !line.trim()) continue;
     const isTail = i >= tailStartIdx;
-    // Fast-skip giant historical response_item lines outside the live tail
+    const isHead = i < 45 && !firstUserPrompt;
+    // Fast-skip giant historical response_item lines outside head (for prompt) and live tail
     if (
       !isTail &&
+      !isHead &&
       !line.includes('"token_count"') &&
       !line.includes('"turn_context"') &&
       !line.includes('"session_meta"') &&
@@ -674,6 +841,11 @@ function parseCodexSession(filePath, statInfo) {
         outputTokens = curOut;
         reasoningTokens = curReason;
         totalTokens = curTot;
+      } else if (p.type === 'user_message' && !firstUserPrompt && p.message) {
+        const msg = String(p.message).trim();
+        if (msg && !msg.startsWith('<') && !msg.startsWith('# AGENTS')) {
+          firstUserPrompt = msg.slice(0, 1800);
+        }
       } else if (p.type === 'task_started') {
         isCompleted = false;
         activity = '正在思考 (Thinking)';
@@ -684,6 +856,20 @@ function parseCodexSession(filePath, statInfo) {
         activityKind = 'idle';
       }
     } else if (obj.type === 'response_item') {
+      if (p.type === 'message' && p.role === 'user') {
+        if (!firstUserPrompt) {
+          const content = p.content;
+          const txt = Array.isArray(content)
+            ? content.map((x) => (x && typeof x === 'object' ? String(x.text || '') : '')).join(' ')
+            : String(content || '');
+          const cleanTxt = txt.trim();
+          if (cleanTxt && !cleanTxt.startsWith('<') && !cleanTxt.startsWith('# AGENTS')) {
+            firstUserPrompt = cleanTxt.slice(0, 1800);
+          }
+        }
+        continue;
+      }
+      if (!isTail) continue;
       isCompleted = false;
       if (p.type === 'reasoning') {
         activity = '正在思考 (Thinking)';
@@ -735,6 +921,7 @@ function parseCodexSession(filePath, statInfo) {
     activity,
     activityKind,
     lastToolDetail,
+    firstUserPrompt,
   };
 
   codexCache.set(filePath, { cacheKey, data });
@@ -785,6 +972,7 @@ function readSummariesDb(dbPath) {
       const running = Boolean(r.not_fully_idle) || r.status === 'CASCADE_RUN_STATUS_RUNNING';
       summaryById.set(r.conversation_id, {
         id: r.conversation_id,
+        explicitTitle: (r.title || '').trim(),
         title: (r.title || '').trim() || (r.preview || '').trim().slice(0, 44) || '',
         workspaceUris: uris,
         projectId: String(r.project_id || ''),
@@ -1363,6 +1551,7 @@ export function buildTelemetrySnapshot({
     }
 
     const { baseModel, effort } = parseModelAndEffort(cs.model, cs.effort);
+    const { taskTitle, rawTaskTitle } = buildChineseTaskTitle({ prompt: cs.firstUserPrompt });
     const promptTot = cs.uncachedInput + cs.cacheRead;
     liveAgents.push({
       id: cs.id,
@@ -1371,6 +1560,8 @@ export function buildTelemetrySnapshot({
       kindLabel: cs.isCliExec ? 'Codex CLI' : 'Codex',
       projectId: cs.projectId,
       projectName: cs.projectName,
+      taskTitle,
+      rawTaskTitle,
       isRunning,
       isStalled,
       stalledMinutes: isStalled ? Math.floor(age / 60000) : 0,
@@ -1409,6 +1600,10 @@ export function buildTelemetrySnapshot({
 
     const totals = summarizeModelEntries(parsed.turns);
     const { baseModel, effort } = parseModelAndEffort(parsed.lastModel);
+    const { taskTitle, rawTaskTitle } = buildChineseTaskTitle({
+      dbTitle: s?.explicitTitle || '',
+      prompt: parsed.firstUserPrompt,
+    });
     liveAgents.push({
       id: cid,
       shortId: cid.slice(0, 8),
@@ -1416,6 +1611,8 @@ export function buildTelemetrySnapshot({
       kindLabel: 'AGY CLI',
       projectId: proj.id,
       projectName: proj.name,
+      taskTitle,
+      rawTaskTitle,
       isRunning,
       isStalled,
       stalledMinutes: isStalled ? Math.floor(age / 60000) : 0,
@@ -1460,6 +1657,11 @@ export function buildTelemetrySnapshot({
     const totals = summarizeModelEntries(parsed?.turns || []);
     const { baseModel, effort } = parseModelAndEffort(parsed?.lastModel || '');
     const kindLabel = desc?.typeName ? `GUI 子智能体 · ${desc.typeName}` : 'GUI 子智能体';
+    const { taskTitle, rawTaskTitle } = buildChineseTaskTitle({
+      dbTitle: s?.explicitTitle || '',
+      role: desc?.role || '',
+      prompt: parsed?.firstUserPrompt || '',
+    });
     liveAgents.push({
       id: cid,
       shortId: cid.slice(0, 8),
@@ -1467,6 +1669,8 @@ export function buildTelemetrySnapshot({
       kindLabel,
       projectId: proj.id,
       projectName: proj.name,
+      taskTitle,
+      rawTaskTitle,
       isRunning,
       isStalled,
       stalledMinutes: isStalled ? Math.floor(age / 60000) : 0,
