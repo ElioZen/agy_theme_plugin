@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="bg" x1="12%" y1="10%" x2="88%" y2="90%">
+      <stop offset="0%" stop-color="#131B36"/>
+      <stop offset="55%" stop-color="#1D2A52"/>
+      <stop offset="100%" stop-color="#0E1528"/>
+    </linearGradient>
+    <linearGradient id="prism" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#60D5FF"/>
+      <stop offset="50%" stop-color="#8B7CFF"/>
+      <stop offset="100%" stop-color="#34D399"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#93C5FD" stop-opacity="0.9"/>
+      <stop offset="50%" stop-color="#C084FC" stop-opacity="0.85"/>
+      <stop offset="100%" stop-color="#34D399" stop-opacity="0.9"/>
+    </linearGradient>
+  </defs>
+  <rect x="12" y="12" width="104" height="104" rx="26" fill="url(#bg)" stroke="rgba(255,255,255,0.22)" stroke-width="2"/>
+  <ellipse cx="64" cy="66" rx="38" ry="14" fill="none" stroke="url(#ring)" stroke-width="3" transform="rotate(-22 64 66)" opacity="0.88"/>
+  <polygon points="64,28 92,82 36,82" fill="url(#prism)" fill-opacity="0.24" stroke="url(#prism)" stroke-width="3.2" stroke-linejoin="round"/>
+  <polygon points="64,42 80,74 48,74" fill="url(#prism)" fill-opacity="0.45"/>
+  <circle cx="94" cy="40" r="4" fill="#FDE68A"/>
+  <circle cx="35" cy="45" r="2.2" fill="#93C5FD" opacity="0.85"/>
+</svg>

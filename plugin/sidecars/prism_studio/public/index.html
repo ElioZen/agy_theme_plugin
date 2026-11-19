@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>棱镜星轨 · Prism Orbit</title>
+  <script src="/preload.js"></script>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <!-- Atmospheric Layers -->
+  <div id="wallpaper-layer" class="wallpaper-layer" aria-hidden="true"></div>
+  <div id="scrim-layer" class="scrim-layer" aria-hidden="true"></div>
+  <div class="ambient-orbs" aria-hidden="true">
+    <span class="orb orb-1"></span>
+    <span class="orb orb-2"></span>
+  </div>
+
+  <!-- Main Shell -->
+  <div class="app-shell">
+    <!-- Top Glass Navigation Bar -->
+    <header class="topbar glass-surface">
+      <div class="topbar-left">
+        <img src="/logo.svg" alt="棱镜星轨" class="brand-logo" />
+        <nav class="nav-tabs" role="tablist">
+          <button class="nav-tab active" data-tab="cockpit" role="tab" aria-selected="true" data-i18n="tab.cockpit">驾驶舱</button>
+          <button class="nav-tab" data-tab="studio" role="tab" aria-selected="false" data-i18n="tab.studio">棱镜工坊</button>
+          <button class="nav-tab" data-tab="guide" role="tab" aria-selected="false" data-i18n="tab.guide">中文速查</button>
+        </nav>
+      </div>
+      <div class="topbar-right">
+        <button id="btn-lang" class="icon-pill" title="切换中英文">中</button>
+        <button id="btn-refresh" class="icon-pill" title="立即刷新">↻</button>
+      </div>
+    </header>
+
+    <!-- Scrollable Content -->
+    <main class="main-scroll">
+      <!-- ==================== TAB 1: COCKPIT ==================== -->
+      <section id="tab-cockpit" class="tab-panel active">
+        <!-- Session Selector Bar -->
+        <div class="glass-card compact-row session-bar">
+          <button id="btn-follow-latest" class="toggle-chip active" type="button">
+            <span class="status-dot"></span>
+            <span data-i18n="cockpit.followLatest">跟随最新</span>
+          </button>
+          <select id="select-conversation" class="glass-select" aria-label="选择会话"></select>
+          <span id="active-status-pill" class="badge-pill">就绪</span>
+        </div>
+
+        <!-- Hero Card: Context Ring Gauge -->
+        <div class="glass-card hero-context-card">
+          <div class="card-header">
+            <div>
+              <h2 class="card-title" data-i18n="cockpit.contextTitle">上下文窗口占用</h2>
+              <p class="card-sub" id="context-subtitle">实时读取本地会话轨迹</p>
+            </div>
+            <div class="seg-group" id="window-limit-group">
+              <button class="seg-btn" data-limit="200000">200k</button>
+              <button class="seg-btn active" data-limit="512000">512k</button>
+              <button class="seg-btn" data-limit="1000000">1M</button>
+            </div>
+          </div>
+
+          <div class="context-hero-body">
+            <!-- Luminous SVG Ring -->
+            <div class="ring-wrap">
+              <svg class="context-ring" viewBox="0 0 120 120">
+                <defs>
+                  <linearGradient id="prismRingGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                    <stop offset="0%" stop-color="var(--prism-accent)" />
+                    <stop offset="55%" stop-color="var(--prism-secondary)" />
+                    <stop offset="100%" stop-color="var(--prism-tertiary)" />
+                  </linearGradient>
+                  <filter id="ringGlow" x="-20%" y="-20%" width="140%" height="140%">
+                    <feGaussianBlur stdDeviation="2.6" result="blur" />
+                    <feMerge>
+                      <feMergeNode in="blur" />
+                      <feMergeNode in="SourceGraphic" />
+                    </feMerge>
+                  </filter>
+                </defs>
+                <circle class="ring-track" cx="60" cy="60" r="48" />
+                <circle id="ring-progress" class="ring-fill" cx="60" cy="60" r="48" filter="url(#ringGlow)" />
+              </svg>
+              <div class="ring-center">
+                <span id="ring-percent" class="ring-percent tabular">0%</span>
+                <span class="ring-label" data-i18n="cockpit.contextShort">已占用</span>
+              </div>
+            </div>
+
+            <!-- Breakdown Metrics -->
+            <div class="context-breakdown">
+              <div class="token-headline tabular">
+                <strong id="ctx-used">0</strong>
+                <span class="muted"> / <span id="ctx-limit">512,000</span></span>
+              </div>
+              <div class="breakdown-list" id="breakdown-list"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Model Telemetry & Speed Sparkline -->
+        <div class="glass-card telemetry-card">
+          <div class="card-header">
+            <h2 class="card-title" data-i18n="cockpit.telemetryTitle">速率与缓存遥测</h2>
+            <span id="last-model-badge" class="model-chip">—</span>
+          </div>
+
+          <div class="telemetry-grid">
+            <div class="metric-block">
+              <div class="metric-label" data-i18n="cockpit.cacheHit">缓存命中率</div>
+              <div class="metric-value tabular" id="metric-cache-rate">0%</div>
+              <div class="mini-bar-track">
+                <div class="mini-bar-fill tertiary" id="metric-cache-bar" style="width:0%"></div>
+              </div>
+            </div>
+            <div class="metric-block">
+              <div class="metric-label" data-i18n="cockpit.speed">生成速率</div>
+              <div class="metric-value tabular">
+                <span id="metric-speed">0</span>
+                <span class="metric-unit">tok/s</span>
+              </div>
+              <div class="metric-sub tabular" id="metric-speed-avg">均值 — tok/s</div>
+            </div>
+            <div class="sparkline-block">
+              <svg id="speed-sparkline" class="sparkline-svg" viewBox="0 0 180 46" preserveAspectRatio="none"></svg>
+            </div>
+          </div>
+        </div>
+
+        <!-- Model Token & Cost Breakdown -->
+        <div class="glass-card usage-card">
+          <div class="card-header wrap-header">
+            <div>
+              <h2 class="card-title" data-i18n="cockpit.usageTitle">模型 Token 用量</h2>
+              <div class="usage-totals tabular">
+                <strong id="usage-total-tokens">0</strong>
+                <span class="cost-pill" id="usage-total-cost">≈ $0.00</span>
+              </div>
+            </div>
+            <div class="filter-controls">
+              <div class="seg-group" id="usage-scope-group">
+                <button class="seg-btn active" data-scope="all" data-i18n="cockpit.scopeAll">全部</button>
+                <button class="seg-btn" data-scope="current" data-i18n="cockpit.scopeCurrent">当前</button>
+              </div>
+              <div class="seg-group" id="usage-range-group">
+                <button class="seg-btn active" data-range="today" data-i18n="cockpit.today">今天</button>
+                <button class="seg-btn" data-range="7d" data-i18n="cockpit.7d">近7天</button>
+                <button class="seg-btn" data-range="30d" data-i18n="cockpit.30d">近30天</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="summary-strip tabular">
+            <span><i class="dot tertiary"></i><span data-i18n="cockpit.cacheRead">缓存命中</span> <strong id="sum-cache">0</strong></span>
+            <span><i class="dot accent"></i><span data-i18n="cockpit.uncached">未命中</span> <strong id="sum-uncached">0</strong></span>
+            <span><i class="dot secondary"></i><span data-i18n="cockpit.output">输出</span> <strong id="sum-output">0</strong></span>
+          </div>
+
+          <div id="models-list" class="models-list"></div>
+          <p class="footnote" data-i18n="cockpit.costNote">* 费用为按公开 API 单价估算的参考值，本地只读统计，不产生额外请求。</p>
+        </div>
+
+        <!-- Active & Recent Conversations -->
+        <div class="glass-card sessions-card">
+          <div class="card-header">
+            <h2 class="card-title" data-i18n="cockpit.sessionsTitle">多项目会话监视</h2>
+            <span class="card-sub" id="running-count-badge">0 运行中</span>
+          </div>
+          <div id="sessions-list" class="sessions-list"></div>
+        </div>
+      </section>
+
+      <!-- ==================== TAB 2: THEME STUDIO ==================== -->
+      <section id="tab-studio" class="tab-panel">
+        <!-- Palette Presets -->
+        <div class="glass-card">
+          <div class="card-header wrap-header">
+            <div>
+              <h2 class="card-title" data-i18n="studio.paletteTitle">液态玻璃色调</h2>
+              <p class="card-sub" data-i18n="studio.paletteSub">六通道实时配色定制与明暗自适应</p>
+            </div>
+            <div class="header-actions">
+              <button id="btn-follow-host" class="toggle-chip" type="button">
+                <span class="status-dot"></span>
+                <span data-i18n="studio.followHost">跟随宿主明暗</span>
+              </button>
+              <button id="btn-reset-colors" class="ghost-btn" type="button" data-i18n="studio.reset">还原默认</button>
+            </div>
+          </div>
+
+          <div id="preset-pills" class="preset-pills"></div>
+
+          <div class="save-preset-row">
+            <input id="input-preset-name" type="text" class="glass-input" placeholder="为当前调色方案命名并保存..." maxlength="24" />
+            <button id="btn-save-preset" class="primary-btn" type="button" data-i18n="studio.savePreset">保存方案</button>
+          </div>
+
+          <div id="color-pickers" class="color-grid"></div>
+        </div>
+
+        <!-- Live Style Preview -->
+        <div class="glass-card preview-card">
+          <div class="card-header">
+            <h2 class="card-title" data-i18n="studio.previewTitle">液态玻璃效果预览</h2>
+            <span id="preview-preset-name" class="badge-pill">星海暖灯</span>
+          </div>
+          <div class="preview-stage">
+            <div class="preview-mini-glass">
+              <div class="preview-mini-top">
+                <span class="preview-title">星海液态玻璃已生效</span>
+                <span class="preview-status">运行中</span>
+              </div>
+              <div class="preview-mini-bar">
+                <span class="preview-bar-label">上下文 38%</span>
+                <div class="preview-bar-track">
+                  <div class="preview-bar-seg seg-1"></div>
+                  <div class="preview-bar-seg seg-2"></div>
+                  <div class="preview-bar-seg seg-3"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Wallpaper Gallery -->
+        <div class="glass-card">
+          <div class="card-header wrap-header">
+            <div>
+              <h2 class="card-title" data-i18n="studio.wallpaperTitle">壁纸画廊</h2>
+              <p class="card-sub" id="active-wallpaper-name">星海夜行电车</p>
+            </div>
+            <div class="header-actions">
+              <button id="btn-random-wp" class="ghost-btn" type="button" data-i18n="studio.randomWp">随机壁纸</button>
+              <button id="btn-upload-wp" class="ghost-btn" type="button" data-i18n="studio.uploadWp">自定义图片</button>
+              <button id="btn-clear-wp" class="ghost-btn" type="button" data-i18n="studio.clearWp">清除</button>
+              <input id="file-wallpaper" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+            </div>
+          </div>
+
+          <div id="wallpaper-grid" class="wallpaper-grid"></div>
+
+          <div class="sliders-grid">
+            <label class="slider-item">
+              <div class="slider-head">
+                <span data-i18n="studio.opacity">壁纸透明度</span>
+                <strong id="val-wp-opacity" class="tabular">92%</strong>
+              </div>
+              <input id="range-wp-opacity" type="range" min="0" max="100" value="92" />
+            </label>
+            <label class="slider-item">
+              <div class="slider-head">
+                <span data-i18n="studio.blur">玻璃磨砂模糊</span>
+                <strong id="val-wp-blur" class="tabular">14px</strong>
+              </div>
+              <input id="range-wp-blur" type="range" min="0" max="28" value="14" />
+            </label>
+            <label class="slider-item">
+              <div class="slider-head">
+                <span data-i18n="studio.darkness">暗度护眼遮罩</span>
+                <strong id="val-wp-darkness" class="tabular">38%</strong>
+              </div>
+              <input id="range-wp-darkness" type="range" min="0" max="85" value="38" />
+            </label>
+            <label class="slider-item">
+              <div class="slider-head">
+                <span data-i18n="studio.radius">卡片圆角柔化</span>
+                <strong id="val-wp-radius" class="tabular">16px</strong>
+              </div>
+              <input id="range-wp-radius" type="range" min="6" max="24" value="16" />
+            </label>
+          </div>
+
+          <div class="fit-row">
+            <span class="fit-label" data-i18n="studio.fitMode">壁纸适配</span>
+            <div class="seg-group" id="wp-fit-group">
+              <button class="seg-btn active" data-fit="cover" data-i18n="studio.fitCover">铺满裁剪</button>
+              <button class="seg-btn" data-fit="contain" data-i18n="studio.fitContain">完整居中</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- macOS Full-Window Backdrop Companion -->
+        <div class="glass-card companion-card">
+          <div class="card-header wrap-header">
+            <div>
+              <div class="title-with-badge">
+                <h2 class="card-title" data-i18n="studio.companionTitle">macOS 整窗氛围伴侣</h2>
+                <span id="companion-status-badge" class="badge-pill">准备就绪</span>
+              </div>
+              <p class="card-sub" data-i18n="studio.companionSub">原生鼠标穿透层 · 自动贴合 Antigravity 窗口 · 零侵入不重启</p>
+            </div>
+            <button id="btn-toggle-companion" class="primary-btn" type="button">开启整窗伴侣</button>
+          </div>
+
+          <div class="sliders-grid">
+            <label class="slider-item">
+              <div class="slider-head">
+                <span data-i18n="studio.compOpacity">整窗壁纸浓度</span>
+                <strong id="val-comp-opacity" class="tabular">22%</strong>
+              </div>
+              <input id="range-comp-opacity" type="range" min="8" max="55" value="22" />
+            </label>
+            <label class="slider-item">
+              <div class="slider-head">
+                <span data-i18n="studio.compVignette">边缘护眼暗角</span>
+                <strong id="val-comp-vignette" class="tabular">32%</strong>
+              </div>
+              <input id="range-comp-vignette" type="range" min="0" max="75" value="32" />
+            </label>
+            <label class="slider-item">
+              <div class="slider-head">
+                <span data-i18n="studio.compBlur">整窗柔焦</span>
+                <strong id="val-comp-blur" class="tabular">0px</strong>
+              </div>
+              <input id="range-comp-blur" type="range" min="0" max="20" value="0" />
+            </label>
+            <label class="checkbox-item">
+              <input id="chk-comp-frontmost" type="checkbox" checked />
+              <span data-i18n="studio.compFrontmost">切到其他应用时自动隐藏</span>
+            </label>
+          </div>
+          <p id="companion-error" class="error-text" hidden></p>
+        </div>
+      </section>
+
+      <!-- ==================== TAB 3: CHINESE LOCALIZATION GUIDE ==================== -->
+      <section id="tab-guide" class="tab-panel">
+        <div class="glass-card">
+          <div class="card-header">
+            <div>
+              <h2 class="card-title">AI 全中文回复规则（一键复制）</h2>
+              <p class="card-sub">粘贴到 Customizations → Rules 即可让 AI 默认用简体中文思考、计划和回复，不影响其他项目。</p>
+            </div>
+            <button id="btn-copy-rule" class="primary-btn" type="button">复制规则</button>
+          </div>
+          <pre id="zh-rule-snippet" class="code-box">## 输出语言规范
+- 所有回复、思考过程摘要、执行计划与任务清单，默认使用自然简洁的简体中文。
+- 代码标识符、命令行、路径与专有技术名词保持英文原文，不做生硬直译。</pre>
+        </div>
+
+        <div class="glass-card">
+          <div class="card-header">
+            <div>
+              <h2 class="card-title">Antigravity 原生英文界面中文对照速查</h2>
+              <p class="card-sub">零篡改 macOS 签名主程序，随时检索菜单、设置项与斜杠命令含义</p>
+            </div>
+          </div>
+          <input id="input-glossary-search" type="text" class="glass-input" placeholder="搜索英文菜单、设置项或斜杠命令（如 Sandbox、/plan、Compact）..." />
+          <div id="glossary-list" class="glossary-list"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

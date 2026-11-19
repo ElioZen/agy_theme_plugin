@@ -1,0 +1,17 @@
+{
+  "name": "agy-theme",
+  "displayName": "Prism Orbit · 棱镜星轨",
+  "version": "1.0.0",
+  "description": "macOS Liquid Glass theme studio, starry wallpaper gallery, click-through ambient backdrop companion, and real-time context/token/cache telemetry cockpit for Antigravity.",
+  "logo": "assets/logo.svg",
+  "author": {
+    "name": "ElioZen",
+    "url": "https://github.com/ElioZen"
+  },
+  "repository": "https://github.com/ElioZen/agy_theme_plugin",
+  "suggestedPrompts": [
+    "打开棱镜星轨侧边栏，切换星海夜行电车壁纸并开启整窗氛围伴侣",
+    "帮我看看当前会话的上下文占用和缓存命中率",
+    "把我的自定义主题方案调成更柔和的暗夜极光玻璃风格"
+  ]
+}
