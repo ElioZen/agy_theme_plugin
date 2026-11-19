@@ -124,8 +124,8 @@ export const BUILTIN_WALLPAPERS = [
   },
 ];
 
-const SCHEMA_VERSION = 2;
-export const ASSET_VERSION = '3.5.0';
+const SCHEMA_VERSION = 3;
+export const ASSET_VERSION = '3.5.1';
 
 export const DEFAULT_SETTINGS = {
   schemaVersion: SCHEMA_VERSION,
@@ -150,7 +150,7 @@ export const DEFAULT_SETTINGS = {
     opacity: 62,
     blur: 0,
     vignette: 18,
-    onlyWhenFrontmost: true,
+    onlyWhenFrontmost: false,
     fit: 'cover',
     blendStyle: 'screen', // 'screen' | 'soft'
     glassRim: true,
@@ -225,16 +225,23 @@ export class PrismStorage {
       if (existsSync(this.settingsPath)) {
         const raw = JSON.parse(readFileSync(this.settingsPath, 'utf-8'));
         const merged = deepMerge(DEFAULT_SETTINGS, raw);
-        // One-time smooth migration from v1 heavy-blur/dark defaults to v2 ultra-clear glass + screen blend
+        // Smooth schema migrations (v2: ultra-clear glass, v3: native Z-locked backdrop without focus-hide flicker)
         if ((raw.schemaVersion || 1) < SCHEMA_VERSION) {
+          const prevVer = raw.schemaVersion || 1;
           merged.schemaVersion = SCHEMA_VERSION;
-          if (merged.wallpaper.blur === 14) merged.wallpaper.blur = 4;
-          if (merged.wallpaper.darkness === 38) merged.wallpaper.darkness = 6;
-          if (merged.wallpaper.opacity === 92) merged.wallpaper.opacity = 100;
-          if (merged.companion.blendStyle === 'crisp') merged.companion.blendStyle = 'screen';
-          if (merged.companion.opacity <= 30) merged.companion.opacity = 62;
-          if (merged.companion.vignette === 32 || merged.companion.vignette === 28) merged.companion.vignette = 18;
-          merged.companion.seamlessRightPane = true;
+          if (prevVer < 2) {
+            if (merged.wallpaper.blur === 14) merged.wallpaper.blur = 4;
+            if (merged.wallpaper.darkness === 38) merged.wallpaper.darkness = 6;
+            if (merged.wallpaper.opacity === 92) merged.wallpaper.opacity = 100;
+            if (merged.companion.blendStyle === 'crisp') merged.companion.blendStyle = 'screen';
+            if (merged.companion.opacity <= 30) merged.companion.opacity = 62;
+            if (merged.companion.vignette === 32 || merged.companion.vignette === 28) merged.companion.vignette = 18;
+            merged.companion.seamlessRightPane = true;
+          }
+          if (prevVer < 3) {
+            // Normal-level relative Z-ordering naturally stays behind other apps with zero flash
+            merged.companion.onlyWhenFrontmost = false;
+          }
           this.#writeAtomic(this.settingsPath, JSON.stringify(merged, null, 2));
           this.syncCompanionConfig(merged);
         }
@@ -387,7 +394,7 @@ export class PrismStorage {
       blur: Math.max(0, Math.min(24, Number(settings.companion?.blur ?? 0))),
       vignette: Math.max(0, Math.min(0.80, Number(settings.companion?.vignette ?? 18) / 100)),
       cornerRadius: 12,
-      onlyWhenFrontmost: settings.companion?.onlyWhenFrontmost !== false,
+      onlyWhenFrontmost: Boolean(settings.companion?.onlyWhenFrontmost),
       fit: settings.companion?.fit || settings.wallpaper?.fit || 'cover',
       blendStyle: settings.companion?.blendStyle === 'soft' ? 'soft' : 'screen',
       tintHex: settings.colors?.canvas || '#0E121B',

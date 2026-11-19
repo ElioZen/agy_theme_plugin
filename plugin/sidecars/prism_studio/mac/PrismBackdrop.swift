@@ -222,16 +222,29 @@ final class BackdropCanvasView: NSView {
     }
 }
 
+struct TrackedWindow {
+    let windowNumber: Int
+    let frame: NSRect
+    let listIndex: Int
+    let isTopmostRegular: Bool
+    let isMostlyOccluded: Bool
+    let myIndex: Int?
+}
+
 final class BackdropController: NSObject {
     private let configPath: String
     private let parentPid: pid_t
     private let window: NSWindow
     private let canvasView: BackdropCanvasView
+    private var activityToken: NSObjectProtocol?
 
     private var config: CompanionConfig?
     private var lastConfigMtime: TimeInterval = 0
     private var lastAppliedFrame: NSRect = .zero
-    private var isVisible = false
+    private var lastOrderedRelativeTo: Int = 0
+    private var isOrderedIn = false
+    private var isDimmedHidden = false
+    private var lostFocusAt: TimeInterval = 0
 
     init(configPath: String, parentPid: pid_t) {
         self.configPath = configPath
@@ -246,20 +259,73 @@ final class BackdropController: NSObject {
         )
         super.init()
 
+        // Prevent macOS App Nap from throttling our background accessory tracker
+        self.activityToken = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
+            reason: "Keep PrismBackdrop Z-order and frame locked to Antigravity"
+        )
+
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = false
         window.ignoresMouseEvents = true
-        window.level = .floating
-        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle, .stationary]
+        window.hidesOnDeactivate = false
+        window.isReleasedWhenClosed = false
+        window.animationBehavior = .none
+        // Normal window level + order(.above, relativeTo: agyWid) locks the backdrop
+        // directly to Antigravity's layer-0 window so other apps naturally cover it
+        // without tearing down the WindowServer surface (zero flash, zero click needed).
+        window.level = .normal
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         window.contentView = canvasView
         window.alphaValue = 1.0
         window.orderOut(nil)
 
         reloadConfig(force: true)
+        registerWorkspaceObservers()
+        tick(forceOrder: true)
 
-        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            self?.tick()
+        Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+            self?.tick(forceOrder: false)
+        }
+    }
+
+    deinit {
+        if let token = activityToken {
+            ProcessInfo.processInfo.endActivity(token)
+        }
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    private func registerWorkspaceObservers() {
+        let wsCenter = NSWorkspace.shared.notificationCenter
+        let wsEvents: [NSNotification.Name] = [
+            NSWorkspace.didActivateApplicationNotification,
+            NSWorkspace.didDeactivateApplicationNotification,
+            NSWorkspace.didHideApplicationNotification,
+            NSWorkspace.didUnhideApplicationNotification,
+            NSWorkspace.activeSpaceDidChangeNotification,
+        ]
+        for name in wsEvents {
+            wsCenter.addObserver(self, selector: #selector(handleWorkspaceEvent(_:)), name: name, object: nil)
+        }
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleWorkspaceEvent(_:)),
+            name: NSApplication.didChangeScreenParametersNotification,
+            object: nil
+        )
+    }
+
+    @objc private func handleWorkspaceEvent(_ notification: Notification) {
+        // React instantaneously (<1ms) to app/space switches + catch post-animation frames
+        tick(forceOrder: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self] in
+            self?.tick(forceOrder: true)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+            self?.tick(forceOrder: true)
         }
     }
 
@@ -290,39 +356,97 @@ final class BackdropController: NSObject {
         return name.contains("antigravity") || bundle.contains("antigravity")
     }
 
-    private func findAntigravityWindowFrame() -> NSRect? {
+    private func inspectAntigravityWindow() -> TrackedWindow? {
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
             return nil
         }
 
         let primaryHeight = CGDisplayBounds(CGMainDisplayID()).height
+        let myWid = window.windowNumber
+        var myRank: Int? = nil
+        var regularRank = 0
+        var higherRects: [CGRect] = []
+        var firstRegularOwner: String? = nil
+
+        var targetInfo: (wid: Int, cgRect: CGRect, rank: Int)? = nil
 
         for info in list {
-            guard let owner = info[kCGWindowOwnerName as String] as? String else { continue }
-            if !owner.lowercased().contains("antigravity") { continue }
+            let wid = (info[kCGWindowNumber as String] as? Int) ?? 0
+            if wid == myWid {
+                myRank = regularRank
+                regularRank += 1
+                continue
+            }
             let layer = (info[kCGWindowLayer as String] as? Int) ?? -1
             if layer != 0 { continue }
-            guard let boundsDict = info[kCGWindowBounds as String] as? [String: Any],
+
+            let alpha = (info[kCGWindowAlpha as String] as? Double) ?? 1.0
+            if alpha <= 0.01 { continue }
+
+            guard let owner = info[kCGWindowOwnerName as String] as? String,
+                  let boundsDict = info[kCGWindowBounds as String] as? [String: Any],
                   let rect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else {
                 continue
             }
-            if rect.width < 360 || rect.height < 260 { continue }
+            if rect.width < 120 || rect.height < 100 { continue }
 
-            let appKitY = primaryHeight - (rect.origin.y + rect.size.height)
-            return NSRect(x: rect.origin.x, y: appKitY, width: rect.size.width, height: rect.size.height)
+            let currentRank = regularRank
+            regularRank += 1
+
+            if firstRegularOwner == nil {
+                firstRegularOwner = owner
+            }
+
+            if targetInfo == nil && owner.lowercased().contains("antigravity") && rect.width >= 360 && rect.height >= 260 {
+                targetInfo = (wid, rect, currentRank)
+            } else if targetInfo == nil {
+                higherRects.append(rect)
+            }
         }
-        return nil
+
+        guard let target = targetInfo else { return nil }
+
+        let targetArea = max(1.0, target.cgRect.width * target.cgRect.height)
+        var maxCoverRatio: CGFloat = 0
+        for hr in higherRects {
+            let inter = hr.intersection(target.cgRect)
+            if !inter.isNull {
+                let ratio = (inter.width * inter.height) / targetArea
+                if ratio > maxCoverRatio { maxCoverRatio = ratio }
+            }
+        }
+
+        let isTopmost = (firstRegularOwner ?? "").lowercased().contains("antigravity")
+        let appKitY = primaryHeight - (target.cgRect.origin.y + target.cgRect.size.height)
+        let frame = NSRect(x: target.cgRect.origin.x, y: appKitY, width: target.cgRect.size.width, height: target.cgRect.size.height)
+
+        return TrackedWindow(
+            windowNumber: target.wid,
+            frame: frame,
+            listIndex: target.rank,
+            isTopmostRegular: isTopmost,
+            isMostlyOccluded: maxCoverRatio >= 0.85,
+            myIndex: myRank
+        )
     }
 
-    private func hideWindow() {
-        if isVisible {
+    private func orderOutCompletely() {
+        if isOrderedIn {
             window.orderOut(nil)
-            isVisible = false
+            isOrderedIn = false
+            lastOrderedRelativeTo = 0
         }
     }
 
-    private func tick() {
+    private func setBackdropAlpha(_ alpha: CGFloat) {
+        if abs(window.alphaValue - alpha) > 0.001 {
+            window.alphaValue = alpha
+        }
+        isDimmedHidden = (alpha < 0.01)
+    }
+
+    private func tick(forceOrder: Bool) {
         if !isParentAlive() {
             NSApp.terminate(nil)
             return
@@ -331,31 +455,57 @@ final class BackdropController: NSObject {
         reloadConfig(force: false)
 
         guard let cfg = config, cfg.enabled else {
-            hideWindow()
+            orderOutCompletely()
             return
         }
 
-        if cfg.onlyWhenFrontmost && !isAntigravityFrontmost() {
-            hideWindow()
+        // Only completely order out when Antigravity is minimized, hidden, or on another Space
+        guard let tracked = inspectAntigravityWindow() else {
+            orderOutCompletely()
             return
         }
 
-        guard let targetFrame = findAntigravityWindowFrame() else {
-            hideWindow()
-            return
+        let frameChanged =
+            abs(tracked.frame.origin.x - lastAppliedFrame.origin.x) > 0.5 ||
+            abs(tracked.frame.origin.y - lastAppliedFrame.origin.y) > 0.5 ||
+            abs(tracked.frame.size.width - lastAppliedFrame.size.width) > 0.5 ||
+            abs(tracked.frame.size.height - lastAppliedFrame.size.height) > 0.5
+
+        if frameChanged {
+            window.setFrame(tracked.frame, display: true)
+            lastAppliedFrame = tracked.frame
         }
 
-        if abs(targetFrame.origin.x - lastAppliedFrame.origin.x) > 0.5 ||
-            abs(targetFrame.origin.y - lastAppliedFrame.origin.y) > 0.5 ||
-            abs(targetFrame.size.width - lastAppliedFrame.size.width) > 0.5 ||
-            abs(targetFrame.size.height - lastAppliedFrame.size.height) > 0.5 {
-            window.setFrame(targetFrame, display: true)
-            lastAppliedFrame = targetFrame
+        // Antigravity counts as active if macOS reports it frontmost OR its window is
+        // already the topmost layer-0 window on screen (eliminates needing a click after switch).
+        let isActive = isAntigravityFrontmost() || tracked.isTopmostRegular
+        let now = Date().timeIntervalSinceReferenceDate
+
+        if cfg.onlyWhenFrontmost && !isActive && !tracked.isMostlyOccluded {
+            // Uncovered split-screen background: brief 180ms grace avoids IME/popover flicker
+            if lostFocusAt == 0 {
+                lostFocusAt = now
+            }
+            if now - lostFocusAt >= 0.18 {
+                setBackdropAlpha(0.0)
+            }
+        } else {
+            // Either Antigravity is active OR cleanly occluded behind another full-size app:
+            // keep alpha=1.0 & Z-glued directly above Antigravity so returning is 100% instant!
+            lostFocusAt = 0
+            setBackdropAlpha(1.0)
         }
 
-        if !isVisible {
-            window.orderFrontRegardless()
-            isVisible = true
+        let zOrderDrifted: Bool = {
+            guard let myIdx = tracked.myIndex else { return true }
+            // Healthy state: our backdrop sits immediately above Antigravity (myIdx == listIndex - 1)
+            return myIdx != tracked.listIndex - 1
+        }()
+
+        if !isOrderedIn || forceOrder || zOrderDrifted || lastOrderedRelativeTo != tracked.windowNumber {
+            window.order(.above, relativeTo: tracked.windowNumber)
+            isOrderedIn = true
+            lastOrderedRelativeTo = tracked.windowNumber
         }
     }
 }

@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_VERSION = '3.5.0';
+  const FRONTEND_VERSION = '3.5.1';
   const COLOR_CHANNELS = [
     { key: 'accent', label: '主强调色' },
     { key: 'secondary', label: '次折射色' },
@@ -508,7 +508,7 @@
     $('#val-comp-blur').textContent = `${comp.blur ?? 0}px`;
     $('#chk-comp-seamless').checked = comp.seamlessRightPane !== false;
     $('#chk-comp-rim').checked = comp.glassRim !== false;
-    $('#chk-comp-frontmost').checked = comp.onlyWhenFrontmost !== false;
+    $('#chk-comp-frontmost').checked = Boolean(comp.onlyWhenFrontmost);
 
     const blend = comp.blendStyle === 'soft' ? 'soft' : 'screen';
     document.querySelectorAll('#comp-blend-group .seg-btn').forEach((b) => {
