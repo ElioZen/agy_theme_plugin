@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -256,8 +256,33 @@ function parseAgyTranscript(filePath) {
           output: outTok,
           contextTokens: inTok + cacheTok + outTok,
           tokPerSec,
+          isCheckpoint: false,
         });
       }
+    } else if (obj.type === 'CHECKPOINT') {
+      // Context compaction is a real LLM summarization call that also hits KV cache.
+      const inTok = Number(obj.input_tokens || 0);
+      const cacheTok = Number(obj.cache_read_tokens || 0);
+      const outTok = Number(obj.output_tokens || 0);
+      const cpModel = String(obj.model || lastModel || 'unknown');
+      if (inTok > 0 || cacheTok > 0 || outTok > 0) {
+        turns.push({
+          stepIndex: Number(obj.step_index || 0),
+          ts,
+          model: cpModel,
+          uncachedInput: inTok,
+          cacheRead: cacheTok,
+          output: outTok,
+          contextTokens: outTok,
+          tokPerSec: null,
+          isCheckpoint: true,
+        });
+      }
+      // Compaction resets active prompt history for subsequent context breakdown weights
+      userChars = 0;
+      assistantChars = String(obj.content || '').length;
+      thinkingChars = 0;
+      toolChars = 0;
     } else {
       toolChars += String(obj.content || '').length;
     }
@@ -363,6 +388,46 @@ function listRecentCodexFiles(maxAgeMs = 7 * 24 * 60 * 60 * 1000) {
   return results.slice(0, 40);
 }
 
+const codexHeaderCwdCache = new Map();
+
+function readCodexHeaderCwd(filePath) {
+  if (codexHeaderCwdCache.has(filePath)) return codexHeaderCwdCache.get(filePath);
+  let fd;
+  let cwd = '';
+  try {
+    fd = openSync(filePath, 'r');
+    const buf = Buffer.alloc(32 * 1024);
+    const bytesRead = readSync(fd, buf, 0, buf.length, 0);
+    const head = buf.subarray(0, bytesRead).toString('utf-8');
+    for (const line of head.split('\n')) {
+      if (!line.trim()) continue;
+      if (!line.includes('"session_meta"') && !line.includes('"turn_context"')) continue;
+      try {
+        const obj = JSON.parse(line);
+        const c = obj?.payload?.cwd;
+        if (c) {
+          cwd = String(c);
+          break;
+        }
+      } catch {
+        // ignore truncated last line in head buffer
+      }
+    }
+  } catch {
+    // ignore
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // ignore
+      }
+    }
+  }
+  if (cwd) codexHeaderCwdCache.set(filePath, cwd);
+  return cwd;
+}
+
 function parseCodexSession(filePath, statInfo) {
   const cacheKey = `${statInfo.mtimeMs}:${statInfo.size}`;
   const cached = codexCache.get(filePath);
@@ -370,15 +435,7 @@ function parseCodexSession(filePath, statInfo) {
 
   let text = '';
   try {
-    // Only parse reasonably sized files fully; for giant multi-day files read head + tail
-    if (statInfo.size > 16 * 1024 * 1024) {
-      const buf = readFileSync(filePath);
-      const head = buf.subarray(0, 64 * 1024).toString('utf-8');
-      const tail = buf.subarray(Math.max(0, buf.length - 512 * 1024)).toString('utf-8');
-      text = `${head}\n${tail.slice(tail.indexOf('\n') + 1)}`;
-    } else {
-      text = readFileSync(filePath, 'utf-8');
-    }
+    text = readFileSync(filePath, 'utf-8');
   } catch {
     return null;
   }
@@ -399,9 +456,30 @@ function parseCodexSession(filePath, statInfo) {
   let activity = '运行中';
   let activityKind = 'thinking';
   let turnCount = 0;
+  let prevUsage = null;
+  const turns = [];
 
-  for (const line of text.split('\n')) {
-    if (!line.trim()) continue;
+  const lines = text.split('\n');
+  const tailStartIdx = Math.max(0, lines.length - 50);
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (!line || !line.trim()) continue;
+    const isTail = i >= tailStartIdx;
+    // Fast-skip giant historical response_item lines outside the live tail
+    if (
+      !isTail &&
+      !line.includes('"token_count"') &&
+      !line.includes('"turn_context"') &&
+      !line.includes('"session_meta"') &&
+      !line.includes('"thread_settings_applied"') &&
+      !line.includes('"task_started"') &&
+      !line.includes('"task_complete"') &&
+      !line.includes('"turn_aborted"')
+    ) {
+      continue;
+    }
+
     let obj;
     try {
       obj = JSON.parse(line);
@@ -429,11 +507,56 @@ function parseCodexSession(filePath, statInfo) {
         if (p.thread_settings?.reasoning_effort) effort = String(p.thread_settings.reasoning_effort);
       } else if (p.type === 'token_count' && p.info?.total_token_usage) {
         const u = p.info.total_token_usage;
-        inputTokens = Number(u.input_tokens || 0);
-        cachedTokens = Number(u.cached_input_tokens || 0);
-        outputTokens = Number(u.output_tokens || 0);
-        reasoningTokens = Number(u.reasoning_output_tokens || 0);
-        totalTokens = Number(u.total_tokens || inputTokens + outputTokens);
+        const curIn = Number(u.input_tokens || 0);
+        const curCached = Number(u.cached_input_tokens || 0);
+        const curOut = Number(u.output_tokens || 0);
+        const curReason = Number(u.reasoning_output_tokens || 0);
+        const curTot = Number(u.total_tokens || curIn + curOut);
+
+        // Compute exact per-event delta from cumulative total_token_usage
+        // (automatically deduplicates repeated token_count snapshots and enables accurate date slicing)
+        let dIn = 0;
+        let dCached = 0;
+        let dOut = 0;
+        if (!prevUsage) {
+          dIn = curIn;
+          dCached = curCached;
+          dOut = curOut;
+        } else if (
+          curIn === prevUsage.input_tokens &&
+          curCached === prevUsage.cached_input_tokens &&
+          curOut === prevUsage.output_tokens
+        ) {
+          // Exact duplicate snapshot — skip
+        } else if (curIn >= prevUsage.input_tokens && curOut >= prevUsage.output_tokens) {
+          dIn = curIn - prevUsage.input_tokens;
+          dCached = Math.max(0, curCached - prevUsage.cached_input_tokens);
+          dOut = curOut - prevUsage.output_tokens;
+        } else if (p.info.last_token_usage) {
+          const lu = p.info.last_token_usage;
+          dIn = Number(lu.input_tokens || 0);
+          dCached = Number(lu.cached_input_tokens || 0);
+          dOut = Number(lu.output_tokens || 0);
+        }
+        prevUsage = { input_tokens: curIn, cached_input_tokens: curCached, output_tokens: curOut };
+
+        if (dIn > 0 || dCached > 0 || dOut > 0) {
+          const clampedCached = Math.min(dIn, dCached);
+          turns.push({
+            ts,
+            model: model || 'codex',
+            effort,
+            uncachedInput: Math.max(0, dIn - clampedCached),
+            cacheRead: clampedCached,
+            output: dOut,
+          });
+        }
+
+        inputTokens = curIn;
+        cachedTokens = curCached;
+        outputTokens = curOut;
+        reasoningTokens = curReason;
+        totalTokens = curTot;
       } else if (p.type === 'task_started') {
         isCompleted = false;
         activity = '正在思考 (Thinking)';
@@ -461,6 +584,14 @@ function parseCodexSession(filePath, statInfo) {
     }
   }
 
+  // Backfill model/effort onto any early turns that preceded the first turn_context event
+  if (model) {
+    for (const t of turns) {
+      if (t.model === 'codex') t.model = model;
+      if (!t.effort && effort) t.effort = effort;
+    }
+  }
+
   const uncachedInput = Math.max(0, inputTokens - cachedTokens);
   const data = {
     id: sessionId,
@@ -478,6 +609,7 @@ function parseCodexSession(filePath, statInfo) {
     output: outputTokens,
     reasoningTokens,
     turnCount,
+    turns,
     lastActiveMs: Math.max(lastEventTs, statInfo.mtimeMs),
     mtimeMs: statInfo.mtimeMs,
     isCompleted,
@@ -860,9 +992,13 @@ export function buildTelemetrySnapshot({
     }
   }
 
-  // Parse recent Codex CLI sessions (last 7 days for stats & live monitor)
+  // Parse recent Codex CLI sessions belonging to configured projects (fast-filter CWD from 32KB header first)
   const codexSessions = [];
   for (const f of listRecentCodexFiles(30 * 24 * 60 * 60 * 1000)) {
+    const headerCwd = readCodexHeaderCwd(f.path);
+    if (headerCwd && !matchProjectByPathOrId(configuredProjects, { paths: [headerCwd] })) {
+      continue;
+    }
     const parsed = parseCodexSession(f.path, f);
     if (!parsed) continue;
     const proj = matchProjectByPathOrId(configuredProjects, { paths: [parsed.cwd] });
@@ -978,20 +1114,12 @@ export function buildTelemetrySnapshot({
   }
 
   for (const cs of codexSessions) {
-    if (cutoffRangeMs > 0 && cs.lastActiveMs < cutoffRangeMs) continue;
-    if (cs.totalTokens <= 0) continue;
+    const ranged = filterByRange(cs.turns || []);
+    if (!ranged.length) continue;
     const bucket = projectStatsMap.get(cs.projectId);
     if (!bucket) continue;
     bucket.codexCliCount += 1;
-    bucket.entries.push({
-      model: cs.model,
-      effort: cs.effort,
-      uncachedInput: cs.uncachedInput,
-      cacheRead: cs.cacheRead,
-      output: cs.output,
-      turns: Math.max(1, cs.turnCount),
-      sourceKind: 'codex-cli',
-    });
+    bucket.entries.push(...ranged.map((t) => ({ ...t, sourceKind: 'codex-cli' })));
   }
 
   const filterBySource = (entries) => {
@@ -1224,7 +1352,7 @@ export function buildTelemetrySnapshot({
         model: parsedLastModel.baseModel,
         effort: parsedLastModel.effort,
         rawModel: activeData?.lastModel || latestTurn?.model || '',
-        turnCount: activeTurns.length,
+        turnCount: activeTurns.filter((t) => !t.isCheckpoint).length,
       },
     },
     activeAgents: {
