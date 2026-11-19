@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_VERSION = '3.5.3';
+  const FRONTEND_VERSION = '3.5.4';
   const COLOR_CHANNELS = [
     { key: 'accent', label: '主强调色' },
     { key: 'secondary', label: '次折射色' },
@@ -1148,6 +1148,52 @@
       cpDurEl.textContent = '—';
       cpDurEl.className = '';
       cpDurEl.title = '';
+    }
+
+    // Derived Row 2: Runway until next compaction / Freed space ratio / Effective input cost ratio
+    const runwayEl = $('#ctx-cp-runway');
+    const growthEl = $('#ctx-cp-growth');
+    const runwayCell = $('#ctx-cell-runway');
+    if (typeof cp.estTurnsToLimit === 'number') {
+      runwayEl.textContent = cp.estTurnsToLimit <= 1 ? '即将触发' : `约 ${cp.estTurnsToLimit} 轮`;
+      runwayEl.className = cp.estTurnsToLimit <= 5 ? 'is-danger' : cp.estTurnsToLimit <= 15 ? 'is-active-cp' : '';
+      growthEl.textContent = cp.avgGrowthPerTurn > 0 ? `+${formatCompact(cp.avgGrowthPerTurn)}/轮` : '';
+      runwayCell.title = `按本周期平均每轮净增 ${formatNumber(cp.avgGrowthPerTurn)} Token 估算，距 ${formatCompact(ctx.limit)} 上限大约还可运行 ${cp.estTurnsToLimit} 轮`;
+    } else {
+      runwayEl.textContent = '待采样';
+      runwayEl.className = '';
+      growthEl.textContent = '需 ≥2 轮计算';
+      runwayCell.title = '至少完成 2 轮对话后自动估算距下次压缩剩余轮数';
+    }
+
+    const freedEl = $('#ctx-cp-freed');
+    const freedSubEl = $('#ctx-cp-freed-sub');
+    const freedCell = $('#ctx-cell-freed');
+    if (typeof cp.freedPercent === 'number') {
+      freedEl.textContent = `${cp.freedPercent.toFixed(1)}%`;
+      freedEl.className = cp.freedPercent >= 85 ? 'is-good' : cp.freedPercent < 70 ? 'is-active-cp' : '';
+      freedSubEl.textContent = `${formatCompact(cp.preTokens)} → ${formatCompact(cp.postTokens)}`;
+      freedCell.title = `上次压缩释放了 ${cp.freedPercent.toFixed(1)}% 上下文空间（${formatNumber(cp.preTokens)} → ${formatNumber(cp.postTokens)}）；若跌破 75% 说明摘要偏臃肿`;
+    } else {
+      freedEl.textContent = '—';
+      freedEl.className = '';
+      freedSubEl.textContent = '首次压缩后显示';
+      freedCell.title = '上次压缩释放的上下文比例（越高越清爽）';
+    }
+
+    const effEl = $('#ctx-cp-eff');
+    const effSubEl = $('#ctx-cp-eff-sub');
+    const effCell = $('#ctx-cell-eff');
+    if (typeof cp.effectiveInputRatio === 'number') {
+      effEl.textContent = `${cp.effectiveInputRatio.toFixed(1)}%`;
+      effEl.className = cp.effectiveInputRatio <= 25 ? 'is-good' : cp.effectiveInputRatio >= 45 ? 'is-danger' : 'is-active-cp';
+      effSubEl.textContent = `缓存1折·省 ${cp.savedInputPercent?.toFixed(0) ?? 0}%`;
+      effCell.title = `等效原价输入占比 = (未命中 + 0.1×缓存读取) / 总输入；越低越省额度，当前缓存约节省 ${cp.savedInputPercent?.toFixed(1) ?? 0}% 输入负担`;
+    } else {
+      effEl.textContent = '—';
+      effEl.className = '';
+      effSubEl.textContent = '缓存按1折·越低越省';
+      effCell.title = '把命中缓存按 10% 折算成原价输入后的真实负担占比，越低越省额度';
     }
 
     // ========== WINDOW 4: ACTIVE CLI & SUBAGENT LIVE MONITOR ==========

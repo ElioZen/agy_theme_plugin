@@ -1367,6 +1367,58 @@ export function buildTelemetrySnapshot({
     (acc, c) => acc + (typeof c.durationMs === 'number' ? c.durationMs : 0),
     0,
   );
+
+  // Derived compaction & context-efficiency metrics:
+  // 1) Estimated remaining turns before hitting windowLimit based on current compaction cycle's avg growth/turn
+  let lastCpTurnIdx = -1;
+  for (let i = activeTurns.length - 1; i >= 0; i -= 1) {
+    if (activeTurns[i].isCheckpoint) {
+      lastCpTurnIdx = i;
+      break;
+    }
+  }
+  const cycleTurns = activeTurns.slice(lastCpTurnIdx + 1).filter((t) => !t.isCheckpoint);
+  let avgGrowthPerTurn = 0;
+  let estTurnsToLimit = null;
+  if (cycleTurns.length >= 2) {
+    let avgDelta = (cycleTurns[cycleTurns.length - 1].contextTokens - cycleTurns[0].contextTokens) / (cycleTurns.length - 1);
+    if (avgDelta < 50) {
+      const posDeltas = [];
+      for (let i = 1; i < cycleTurns.length; i += 1) {
+        const d = cycleTurns[i].contextTokens - cycleTurns[i - 1].contextTokens;
+        if (d > 0) posDeltas.push(d);
+      }
+      if (posDeltas.length) {
+        avgDelta = posDeltas.reduce((a, b) => a + b, 0) / posDeltas.length;
+      }
+    }
+    if (avgDelta >= 50) {
+      avgGrowthPerTurn = Math.round(avgDelta);
+      estTurnsToLimit = Math.max(0, Math.round(remainingTokens / avgDelta));
+    }
+  }
+
+  // 2) Last compaction space freed ratio
+  const preTokens = lastCp?.preTokens || 0;
+  const postTokens = lastCp?.postTokens || lastCp?.summaryTokens || 0;
+  const freedPercent =
+    preTokens > 0 && postTokens > 0 && preTokens > postTokens
+      ? Math.round(((preTokens - postTokens) / preTokens) * 1000) / 10
+      : null;
+
+  // 3) Effective input cost ratio (cached input counted at 0.1x standard uncached input)
+  let sessUncached = 0;
+  let sessCache = 0;
+  for (const t of activeTurns) {
+    sessUncached += Number(t.uncachedInput || 0);
+    sessCache += Number(t.cacheRead || 0);
+  }
+  const sessPromptTot = sessUncached + sessCache;
+  const effectiveInputRatio =
+    sessPromptTot > 0 ? Math.round(((sessUncached + sessCache * 0.1) / sessPromptTot) * 1000) / 10 : null;
+  const savedInputPercent =
+    effectiveInputRatio !== null ? Math.round((100 - effectiveInputRatio) * 10) / 10 : null;
+
   const compaction = {
     count: checkpoints.length,
     lastAtMs: lastCp?.startMs || 0,
@@ -1377,8 +1429,13 @@ export function buildTelemetrySnapshot({
         ? Math.max(0, nowMs - lastCp.startMs)
         : null,
     inProgress: Boolean(lastCp?.inProgress),
-    preTokens: lastCp?.preTokens || 0,
-    postTokens: lastCp?.postTokens || lastCp?.summaryTokens || 0,
+    preTokens,
+    postTokens,
+    freedPercent,
+    avgGrowthPerTurn,
+    estTurnsToLimit,
+    effectiveInputRatio,
+    savedInputPercent,
     totalDurationMs: totalCpDurationMs,
   };
 

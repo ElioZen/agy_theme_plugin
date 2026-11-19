@@ -1062,9 +1062,9 @@ body.theme-light .seg-group { background: rgba(15, 23, 42, 0.06); }
 .ctx-compact-bar {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
+  gap: 8px 9px;
   margin-top: 9px;
-  padding: 7px 9px;
+  padding: 8px 9px;
   border-radius: 9px;
   background: rgba(8, 12, 24, 0.26);
   border: 1px solid var(--prism-border-soft);
@@ -1085,6 +1085,20 @@ body.theme-light .seg-group { background: rgba(15, 23, 42, 0.06); }
 }
 .ctx-compact-cell strong.is-active-cp {
   color: var(--prism-secondary);
+}
+.ctx-compact-cell strong.is-good {
+  color: var(--prism-tertiary);
+}
+.ctx-compact-cell strong.is-danger {
+  color: #fca5a5;
+}
+.ctx-compact-hint {
+  font-size: 9.5px;
+  color: var(--prism-muted);
+  opacity: 0.85;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ==================== WINDOW 3: ACTIVE CLI & SUBAGENT MONITOR ==================== */
