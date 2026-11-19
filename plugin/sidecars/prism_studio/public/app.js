@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_VERSION = '3.3.0';
+  const FRONTEND_VERSION = '3.4.0';
   const COLOR_CHANNELS = [
     { key: 'accent', label: '主强调色' },
     { key: 'secondary', label: '次折射色' },
@@ -518,8 +518,20 @@
       switchStrip.hidden = true;
     }
 
-    // ========== WINDOW 2: QUOTA MONITOR (Official Usage style: remaining %, used %, reset timer, ring) ==========
-    const q = telemetry.quotas;
+    // ========== WINDOW 2: AUTOMATIC OFFICIAL QUOTA MONITOR ==========
+    const oq = telemetry.officialQuota || {};
+    const syncBadge = $('#quota-sync-badge');
+    if (oq.syncing) {
+      syncBadge.textContent = '同步中...';
+      syncBadge.className = 'badge-pill warn';
+    } else if (oq.available && oq.fetchedAtMs) {
+      syncBadge.textContent = formatRelativeTime(oq.fetchedAtMs);
+      syncBadge.className = 'badge-pill running';
+    } else {
+      syncBadge.textContent = '等待同步';
+      syncBadge.className = 'badge-pill';
+    }
+
     const renderQuotaRing = (leftPct) => {
       const r = 8.5;
       const circ = 2 * Math.PI * r;
@@ -542,17 +554,19 @@
     };
 
     const renderQuotaBox = (group) => {
-      const renderItem = (title, win) => {
-        const a = win.anchor;
-        const leftPct = a ? Math.round(a.leftPct) : null;
-        const usedPct = a ? Math.max(0, 100 - leftPct) : null;
-        const resetLine = a
-          ? a.resetAtMs
-            ? formatCountdown(a.resetInMs)
-            : leftPct === 100
-            ? '已满额'
-            : '未填刷新时间'
-          : '点右上角校准';
+      const renderItem = (title, bucket) => {
+        const hasVal = Boolean(bucket && typeof bucket.remainingPct === 'number');
+        const leftPct = hasVal ? bucket.remainingPct : null;
+        const usedPct = hasVal ? bucket.usedPct : null;
+        const leftText = leftPct !== null ? `${Number.isInteger(leftPct) ? leftPct : leftPct.toFixed(1)}% 剩余` : '—';
+        const usedText = usedPct !== null ? `已用 ${Number.isInteger(usedPct) ? usedPct : usedPct.toFixed(1)}%` : '总 100%';
+        const resetLine = !hasVal
+          ? (oq.syncing ? '同步中...' : '点击刷新')
+          : leftPct >= 99.95
+          ? '已满额'
+          : bucket.resetAtMs
+          ? formatCountdown(bucket.resetInMs)
+          : '—';
         return `
           <div class="quota-item">
             <div class="quota-left">
@@ -561,8 +575,8 @@
             </div>
             <div class="quota-right">
               <div class="quota-pct-col tabular">
-                <span class="quota-pct-main">${leftPct !== null ? `${leftPct}% 剩余` : '—% 剩余'}</span>
-                <span class="quota-pct-used">${usedPct !== null ? `已用 ${usedPct}%` : `总 100%`}</span>
+                <span class="quota-pct-main">${leftText}</span>
+                <span class="quota-pct-used">${usedText}</span>
               </div>
               ${renderQuotaRing(leftPct)}
             </div>
@@ -571,13 +585,14 @@
       };
       return `
         <div class="quota-box">
-          <div class="quota-head">${group.label}</div>
-          ${renderItem('每周限额', group.d7)}
-          ${renderItem('5小时限额', group.h5)}
+          <div class="quota-head">${group?.label || ''}</div>
+          ${renderItem('每周限额', group?.weekly)}
+          ${renderItem('5小时限额', group?.h5)}
         </div>
       `;
     };
-    $('#quota-grid').innerHTML = renderQuotaBox(q.gemini) + renderQuotaBox(q.claude);
+
+    $('#quota-grid').innerHTML = renderQuotaBox(oq.gemini) + renderQuotaBox(oq.claude);
 
     // ========== WINDOW 3: STANDALONE REAL-TIME CONTEXT ==========
     const ctx = telemetry.context;
@@ -814,66 +829,21 @@
       await loadTelemetry();
     });
 
-    // Window 2: Quota Anchor controls
-    $('#btn-quota-anchor').addEventListener('click', () => {
-      const box = $('#quota-anchor-editor');
-      box.hidden = !box.hidden;
-      if (!box.hidden && appState?.settings?.quotaAnchor) {
-        const qa = appState.settings.quotaAnchor;
-        const setVal = (id, v) => { if (v !== null && v !== undefined) $(id).value = v; };
-        setVal('#inp-g7d-pct', qa.gemini7d?.leftPct);
-        setVal('#inp-g5h-pct', qa.gemini5h?.leftPct);
-        setVal('#inp-c7d-pct', qa.claude7d?.leftPct);
-        setVal('#inp-c5h-pct', qa.claude5h?.leftPct);
-      }
-    });
-
-    $('#btn-save-anchor').addEventListener('click', async () => {
-      const payload = {
-        g7dPct: $('#inp-g7d-pct').value.trim(),
-        g7dReset: $('#inp-g7d-reset').value.trim(),
-        g5hPct: $('#inp-g5h-pct').value.trim(),
-        g5hReset: $('#inp-g5h-reset').value.trim(),
-        c7dPct: $('#inp-c7d-pct').value.trim(),
-        c7dReset: $('#inp-c7d-reset').value.trim(),
-        c5hPct: $('#inp-c5h-pct').value.trim(),
-        c5hReset: $('#inp-c5h-reset').value.trim(),
-      };
-      if (!payload.g7dPct && !payload.g5hPct && !payload.c7dPct && !payload.c5hPct) {
-        showToast('请至少填入一项剩余百分比');
-        return;
-      }
+    // Window 2: Automatic Official Quota Refresh
+    $('#btn-quota-refresh').addEventListener('click', async () => {
+      const btn = $('#btn-quota-refresh');
+      btn.disabled = true;
+      btn.textContent = '同步中...';
       try {
-        const res = await apiFetch('/api/quota-anchor', {
-          method: 'POST',
-          body: JSON.stringify(payload),
-        });
-        if (!res.ok) {
-          const errText = await res.text().catch(() => '');
-          throw new Error(`HTTP ${res.status}${errText ? ': ' + errText.slice(0, 60) : ''}`);
-        }
-        appState = await res.json();
-        $('#quota-anchor-editor').hidden = true;
-        await loadTelemetry();
-        showToast('已校准额度并开启倒计时');
-      } catch (err) {
-        showToast(`保存失败（${err.message}），请重开驾驶舱标签页`);
-      }
-    });
-
-    $('#btn-clear-anchor').addEventListener('click', async () => {
-      try {
-        const res = await apiFetch('/api/quota-anchor', {
-          method: 'POST',
-          body: JSON.stringify({ clear: true }),
-        });
+        const res = await apiFetch('/api/quota/refresh', { method: 'POST', body: '{}' });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        appState = await res.json();
-        $('#quota-anchor-editor').hidden = true;
         await loadTelemetry();
-        showToast('已清空校准数据');
+        showToast('官方额度已同步');
       } catch (err) {
-        showToast(`操作失败（${err.message}）`);
+        showToast(`刷新失败：${err.message}`);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '刷新';
       }
     });
 

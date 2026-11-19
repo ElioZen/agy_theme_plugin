@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
 import { SidecarApp, Response } from 'sidecar_sdk';
 import { MacBackdropCompanion } from './companion.mjs';
+import { AgyQuotaFetcher } from './quota_fetcher.mjs';
 import {
   ASSET_VERSION,
   BUILTIN_PRESETS,
@@ -14,6 +15,7 @@ import { buildTelemetrySnapshot } from './telemetry.mjs';
 
 const storage = new PrismStorage();
 const companion = new MacBackdropCompanion(storage);
+const quotaFetcher = new AgyQuotaFetcher(storage);
 
 const MIME_BY_EXT = {
   '.html': 'text/html; charset=utf-8',
@@ -32,7 +34,7 @@ function readPublicFile(relPath) {
   const contentType = MIME_BY_EXT[extname(fullPath).toLowerCase()] || 'application/octet-stream';
   return new Response(readFileSync(fullPath), {
     contentType,
-    headers: { 'Cache-Control': 'no-cache' },
+    headers: { 'Cache-Control': 'no-store' },
   });
 }
 
@@ -50,6 +52,7 @@ function buildStatePayload(settings = storage.loadSettings()) {
 }
 
 function cleanup() {
+  quotaFetcher.stop();
   companion.stop();
 }
 process.on('exit', cleanup);
@@ -186,47 +189,9 @@ app.api('/api/companion', async (data) => {
   return buildStatePayload(current);
 });
 
-function parseResetDurationMs(text) {
-  const s = String(text || '').trim().toLowerCase();
-  if (!s) return 0;
-  let ms = 0;
-  const d = /(\d+)\s*(?:d|天)/.exec(s);
-  const h = /(\d+)\s*(?:h|小时|时)/.exec(s);
-  const m = /(\d+)\s*(?:m|分)/.exec(s);
-  if (d) ms += Number(d[1]) * 24 * 60 * 60 * 1000;
-  if (h) ms += Number(h[1]) * 60 * 60 * 1000;
-  if (m) ms += Number(m[1]) * 60 * 1000;
-  return ms;
-}
-
-app.api('/api/quota-anchor', (data) => {
-  if (data?.clear) {
-    const updated = storage.saveSettings({
-      quotaAnchor: { gemini5h: null, gemini7d: null, claude5h: null, claude7d: null },
-    });
-    return buildStatePayload(updated);
-  }
-  const now = Date.now();
-  const buildEntry = (pctVal, resetStr) => {
-    if (pctVal === '' || pctVal === null || pctVal === undefined) return null;
-    const pct = Math.max(0, Math.min(100, Number(pctVal)));
-    if (!Number.isFinite(pct)) return null;
-    const durMs = parseResetDurationMs(resetStr);
-    return {
-      leftPct: pct,
-      resetAtMs: durMs > 0 ? now + durMs : 0,
-      anchoredAtMs: now,
-    };
-  };
-  const updated = storage.saveSettings({
-    quotaAnchor: {
-      gemini5h: buildEntry(data?.g5hPct, data?.g5hReset),
-      gemini7d: buildEntry(data?.g7dPct, data?.g7dReset),
-      claude5h: buildEntry(data?.c5hPct, data?.c5hReset),
-      claude7d: buildEntry(data?.c7dPct, data?.c7dReset),
-    },
-  });
-  return buildStatePayload(updated);
+app.api('/api/quota/refresh', async () => {
+  const officialQuota = await quotaFetcher.refresh();
+  return { officialQuota };
 });
 
 app.api(
@@ -256,7 +221,7 @@ app.api(
         ? data.showRecentAgents === 'true' || data.showRecentAgents === true
         : Boolean(settings.telemetry.showRecentAgents);
 
-    return buildTelemetrySnapshot({
+    const snap = buildTelemetrySnapshot({
       conversationId,
       hostConversationId,
       activeWorkspaceUri,
@@ -267,13 +232,17 @@ app.api(
       range,
       windowLimit,
       showRecentAgents,
-      quotaAnchor: settings.quotaAnchor || {},
     });
+    return {
+      ...snap,
+      officialQuota: quotaFetcher.getSnapshot(),
+    };
   },
   'GET',
 );
 
 await app.run();
+quotaFetcher.startAutoRefresh(3 * 60 * 1000);
 const initialSettings = storage.loadSettings();
 storage.syncCompanionConfig(initialSettings);
 if (initialSettings.companion?.enabled) {

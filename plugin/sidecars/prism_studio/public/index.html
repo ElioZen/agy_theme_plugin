@@ -87,30 +87,15 @@
           <div id="projects-switch-strip" class="projects-mini-grid"></div>
         </div>
 
-        <!-- WINDOW 2: Quota Monitor -->
+        <!-- WINDOW 2: Automatic Official Quota Monitor -->
         <div class="glass-card">
           <div class="card-header">
-            <h2 class="card-title">额度监控</h2>
-            <button id="btn-quota-anchor" class="ghost-btn compact-btn" type="button">校准</button>
-          </div>
-
-          <div id="quota-anchor-editor" class="anchor-editor" hidden>
-            <div class="anchor-grid">
-              <label><span>Gemini 周剩余(%)</span><input id="inp-g7d-pct" type="number" min="0" max="100" placeholder="68" class="glass-input" /></label>
-              <label><span>Gemini 周刷新</span><input id="inp-g7d-reset" type="text" placeholder="6d 4h" class="glass-input" /></label>
-              <label><span>Gemini 5h剩余(%)</span><input id="inp-g5h-pct" type="number" min="0" max="100" placeholder="84" class="glass-input" /></label>
-              <label><span>Gemini 5h刷新</span><input id="inp-g5h-reset" type="text" placeholder="4h 15m" class="glass-input" /></label>
-              <label><span>Claude 周剩余(%)</span><input id="inp-c7d-pct" type="number" min="0" max="100" placeholder="24" class="glass-input" /></label>
-              <label><span>Claude 周刷新</span><input id="inp-c7d-reset" type="text" placeholder="6d 4h" class="glass-input" /></label>
-              <label><span>Claude 5h剩余(%)</span><input id="inp-c5h-pct" type="number" min="0" max="100" placeholder="100" class="glass-input" /></label>
-              <label><span>Claude 5h刷新</span><input id="inp-c5h-reset" type="text" placeholder="5h" class="glass-input" /></label>
+            <div class="title-with-badge">
+              <h2 class="card-title">额度监控</h2>
+              <span id="quota-sync-badge" class="badge-pill">同步中...</span>
             </div>
-            <div class="anchor-actions">
-              <button id="btn-clear-anchor" class="ghost-btn compact-btn" type="button">清空</button>
-              <button id="btn-save-anchor" class="primary-btn compact-btn" type="button">保存</button>
-            </div>
+            <button id="btn-quota-refresh" class="ghost-btn compact-btn" type="button">刷新</button>
           </div>
-
           <div id="quota-grid" class="quota-grid"></div>
         </div>
 
