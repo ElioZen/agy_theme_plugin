@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_VERSION = '3.5.1';
+  const FRONTEND_VERSION = '3.5.2';
   const COLOR_CHANNELS = [
     { key: 'accent', label: '主强调色' },
     { key: 'secondary', label: '次折射色' },
@@ -57,10 +57,34 @@
 
   function formatCompact(n) {
     const num = Number(n || 0);
+    if (num >= 1_000_000_000_000) return `${(num / 1_000_000_000_000).toFixed(2)}T`;
     if (num >= 1_000_000_000) return `${(num / 1_000_000_000).toFixed(2)}B`;
     if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(2)}M`;
     if (num >= 1_000) return `${(num / 1_000).toFixed(1)}k`;
     return String(num);
+  }
+
+  function formatDurationSec(ms) {
+    if (ms === null || ms === undefined || !Number.isFinite(ms)) return '—';
+    const sec = Math.max(0, Math.round(ms / 1000));
+    if (sec < 60) return `${sec}s`;
+    const mins = Math.floor(sec / 60);
+    const rem = sec % 60;
+    return rem > 0 ? `${mins}m ${rem}s` : `${mins}m`;
+  }
+
+  function formatClockTime(ms) {
+    if (!ms) return '—';
+    const d = new Date(ms);
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    const now = new Date();
+    const sameDay =
+      d.getFullYear() === now.getFullYear() &&
+      d.getMonth() === now.getMonth() &&
+      d.getDate() === now.getDate();
+    if (sameDay) return `${hh}:${mm}`;
+    return `${d.getMonth() + 1}/${d.getDate()} ${hh}:${mm}`;
   }
 
   function formatCountdown(ms) {
@@ -1092,6 +1116,37 @@
     $('#ctx-effort-badge').textContent = spd.effort || '—';
     $('#metric-speed').textContent = spd.latest ? spd.latest.toFixed(1) : '—';
     renderSparkline(spd.sparkline);
+
+    const cp = ctx.compaction || { count: 0, lastAtMs: 0, lastDurationMs: null, inProgress: false };
+    const cpCountEl = $('#ctx-cp-count');
+    const cpLastEl = $('#ctx-cp-last');
+    const cpDurEl = $('#ctx-cp-dur');
+    cpCountEl.textContent = `${cp.count || 0} 次`;
+    if (cp.count > 0 && cp.lastAtMs) {
+      const clock = formatClockTime(cp.lastAtMs);
+      const rel = formatRelativeTime(cp.lastAtMs);
+      cpLastEl.textContent = `${clock} · ${rel}`;
+      cpLastEl.title = new Date(cp.lastAtMs).toLocaleString('zh-CN');
+    } else {
+      cpLastEl.textContent = '尚未压缩';
+      cpLastEl.title = '';
+    }
+    if (cp.inProgress) {
+      cpDurEl.textContent = `压缩中 ${formatDurationSec(cp.lastDurationMs)}`;
+      cpDurEl.className = 'is-active-cp';
+      cpDurEl.title = '';
+    } else if (typeof cp.lastDurationMs === 'number') {
+      cpDurEl.textContent = formatDurationSec(cp.lastDurationMs);
+      cpDurEl.className = '';
+      cpDurEl.title =
+        cp.preTokens > 0
+          ? `压缩前 ${formatCompact(cp.preTokens)} → 压缩后 ${formatCompact(cp.postTokens)}`
+          : '';
+    } else {
+      cpDurEl.textContent = '—';
+      cpDurEl.className = '';
+      cpDurEl.title = '';
+    }
 
     // ========== WINDOW 4: ACTIVE CLI & SUBAGENT LIVE MONITOR ==========
     const ag = telemetry.activeAgents;

@@ -277,6 +277,8 @@ function parseAgyTranscript(filePath) {
   }
 
   const turns = [];
+  const checkpoints = [];
+  let pendingCheckpoint = null;
   let userChars = 0;
   let assistantChars = 0;
   let thinkingChars = 0;
@@ -301,6 +303,23 @@ function parseAgyTranscript(filePath) {
     lastObj = obj;
     const ts = parseTimestampMs(obj.created_at);
     if (ts > lastStepAt) lastStepAt = ts;
+
+    // Close out the preceding CHECKPOINT's exact duration using the immediately following step's start time
+    // (In Antigravity transcripts, every step's created_at marks its exact start timestamp.)
+    if (pendingCheckpoint) {
+      if (ts > 0 && pendingCheckpoint.startMs > 0 && obj.type !== 'USER_INPUT') {
+        const delta = ts - pendingCheckpoint.startMs;
+        if (delta >= 0 && delta <= 20 * 60 * 1000) {
+          pendingCheckpoint.endMs = ts;
+          pendingCheckpoint.durationMs = delta;
+          pendingCheckpoint.inProgress = false;
+        }
+      }
+      if (obj.type === 'PLANNER_RESPONSE') {
+        pendingCheckpoint.postTokens = Number(obj.input_tokens || 0) + Number(obj.cache_read_tokens || 0);
+      }
+      pendingCheckpoint = null;
+    }
 
     if (obj.type === 'USER_INPUT') {
       userChars += String(obj.content || '').length;
@@ -361,6 +380,19 @@ function parseAgyTranscript(filePath) {
         });
       }
       // Compaction resets active prompt history for subsequent context breakdown weights
+      const cpRec = {
+        stepIndex: Number(obj.step_index || 0),
+        startMs: ts,
+        endMs: 0,
+        durationMs: null,
+        preTokens: inTok + cacheTok,
+        summaryTokens: outTok,
+        postTokens: 0,
+        inProgress: Boolean(obj.status && obj.status !== 'DONE' && obj.status !== 'ERROR'),
+      };
+      checkpoints.push(cpRec);
+      pendingCheckpoint = cpRec;
+
       userChars = 0;
       assistantChars = String(obj.content || '').length;
       thinkingChars = 0;
@@ -411,6 +443,7 @@ function parseAgyTranscript(filePath) {
 
   const data = {
     turns,
+    checkpoints,
     totalSteps,
     lastModel,
     lastStepAt,
@@ -1140,6 +1173,27 @@ export function buildTelemetrySnapshot({
     isDrop: isCacheDrop,
   };
 
+  const checkpoints = activeData?.checkpoints || [];
+  const lastCp = checkpoints.length > 0 ? checkpoints[checkpoints.length - 1] : null;
+  const totalCpDurationMs = checkpoints.reduce(
+    (acc, c) => acc + (typeof c.durationMs === 'number' ? c.durationMs : 0),
+    0,
+  );
+  const compaction = {
+    count: checkpoints.length,
+    lastAtMs: lastCp?.startMs || 0,
+    lastDurationMs:
+      lastCp && typeof lastCp.durationMs === 'number'
+        ? lastCp.durationMs
+        : lastCp && lastCp.inProgress && lastCp.startMs
+        ? Math.max(0, nowMs - lastCp.startMs)
+        : null,
+    inProgress: Boolean(lastCp?.inProgress),
+    preTokens: lastCp?.preTokens || 0,
+    postTokens: lastCp?.postTokens || lastCp?.summaryTokens || 0,
+    totalDurationMs: totalCpDurationMs,
+  };
+
   const speedPoints = activeTurns
     .filter((t) => typeof t.tokPerSec === 'number')
     .slice(-14)
@@ -1466,6 +1520,7 @@ export function buildTelemetrySnapshot({
       percent: usedPercent,
       remaining: remainingTokens,
       lastTurnCache,
+      compaction,
       breakdown: {
         system: systemBase,
         thinking: thinkingTokens,

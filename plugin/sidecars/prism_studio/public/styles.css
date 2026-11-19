@@ -1059,6 +1059,34 @@ body.theme-light .seg-group { background: rgba(15, 23, 42, 0.06); }
 }
 .sparkline-svg { width: 100%; height: 100%; display: block; }
 
+.ctx-compact-bar {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 9px;
+  padding: 7px 9px;
+  border-radius: 9px;
+  background: rgba(8, 12, 24, 0.26);
+  border: 1px solid var(--prism-border-soft);
+}
+.ctx-compact-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.ctx-compact-cell strong {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--prism-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ctx-compact-cell strong.is-active-cp {
+  color: var(--prism-secondary);
+}
+
 /* ==================== WINDOW 3: ACTIVE CLI & SUBAGENT MONITOR ==================== */
 .agents-list { display: flex; flex-direction: column; gap: 7px; }
 
