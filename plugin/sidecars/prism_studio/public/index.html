@@ -8,40 +8,35 @@
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
-  <!-- Atmospheric Layers -->
   <div id="wallpaper-layer" class="wallpaper-layer" aria-hidden="true"></div>
   <div id="scrim-layer" class="scrim-layer" aria-hidden="true"></div>
 
-  <!-- Main Shell -->
   <div class="app-shell">
-    <!-- Ultra-Minimal Space-Saving Topbar -->
     <header class="topbar glass-surface">
       <div class="topbar-left">
         <img src="/logo.svg" alt="驾驶舱" class="brand-logo" />
         <select id="select-project" class="glass-select top-project-select" aria-label="切换项目"></select>
-        <button id="btn-follow-latest" class="toggle-chip active" type="button" title="自动跟随 Antigravity 当前打开的会话与项目">
+        <button id="btn-follow-latest" class="toggle-chip active" type="button">
           <span class="status-dot"></span>
           <span>跟随</span>
         </button>
       </div>
       <div class="topbar-right">
         <button id="btn-page-toggle" class="ghost-btn page-switch-btn" type="button">外观美化</button>
-        <button id="btn-refresh" class="icon-pill" title="立即刷新">↻</button>
+        <button id="btn-refresh" class="icon-pill" title="刷新">↻</button>
       </div>
     </header>
 
-    <!-- Scrollable Content -->
     <main class="main-scroll">
-      <!-- ==================== PAGE 1 (DEFAULT): COCKPIT ==================== -->
+      <!-- ==================== PAGE 1: COCKPIT ==================== -->
       <section id="page-cockpit" class="page-view active">
-        <!-- Compact Single-Line Session Switcher -->
         <div class="glass-card session-strip">
           <select id="select-conversation" class="glass-select" aria-label="切换会话"></select>
           <span id="active-status-pill" class="badge-pill">就绪</span>
-          <button id="btn-jump-conv" class="ghost-btn compact-btn" type="button" title="在主窗口切换到该会话">跳转</button>
+          <button id="btn-jump-conv" class="ghost-btn compact-btn" type="button">跳转</button>
         </div>
 
-        <!-- WINDOW 1 (TOP): Unified Project & Session Token Statistics -->
+        <!-- WINDOW 1: Project & Session Stats -->
         <div class="glass-card">
           <div class="card-header wrap-header">
             <div>
@@ -67,76 +62,62 @@
             </div>
           </div>
 
-          <div class="stats-meta-row">
-            <span id="stats-scope-caption" class="card-sub">—</span>
+          <div class="stats-meta-row" id="stats-source-row">
+            <div id="source-split-strip" class="source-split-strip tabular">
+              <span>AGY GUI <strong id="src-gui">0</strong></span>
+              <span>AGY CLI <strong id="src-agycli">0</strong></span>
+              <span>Codex <strong id="src-codex">0</strong></span>
+            </div>
             <div class="seg-group" id="stats-source-group">
               <button class="seg-btn active" data-source="all">全部</button>
-              <button class="seg-btn" data-source="gui">AGY GUI</button>
+              <button class="seg-btn" data-source="gui">GUI</button>
               <button class="seg-btn" data-source="agy-cli">AGY CLI</button>
               <button class="seg-btn" data-source="codex-cli">Codex</button>
             </div>
           </div>
 
-          <!-- Source Breakdown (strictly separates AGY GUI vs AGY CLI vs Codex CLI) -->
-          <div id="source-split-strip" class="source-split-strip tabular">
-            <span>AGY GUI <strong id="src-gui">0</strong></span>
-            <span>AGY CLI <strong id="src-agycli">0</strong></span>
-            <span>Codex CLI <strong id="src-codex">0</strong></span>
-          </div>
-
-          <!-- Cache / Uncached / Output summary -->
           <div class="summary-strip tabular">
             <span><i class="dot tertiary"></i>缓存命中 <strong id="sum-cache">0</strong></span>
             <span><i class="dot accent"></i>未命中 <strong id="sum-uncached">0</strong></span>
             <span><i class="dot secondary"></i>输出 <strong id="sum-output">0</strong></span>
           </div>
 
-          <!-- Model Ratio Bar & Detailed Per-Model Breakdown -->
           <div id="stats-ratio-bar" class="ratio-bar"></div>
           <div id="stats-models-list" class="models-list"></div>
-
-          <!-- Always-visible Quick Project Switcher Strip -->
           <div id="projects-switch-strip" class="projects-mini-grid"></div>
         </div>
 
-        <!-- WINDOW 2: 5h & Weekly Quota Window Monitor (Honest Local + Optional Official Anchor) -->
+        <!-- WINDOW 2: Quota Monitor -->
         <div class="glass-card">
-          <div class="card-header wrap-header">
-            <div>
-              <h2 class="card-title">5小时与每周额度监控</h2>
-              <p class="card-sub">仅计入 Antigravity（GUI + AGY CLI），不含外部 Codex；支持同步官方剩余 % 与重置倒计时</p>
-            </div>
-            <button id="btn-quota-anchor" class="ghost-btn compact-btn" type="button">同步官方实测</button>
+          <div class="card-header">
+            <h2 class="card-title">额度监控</h2>
+            <button id="btn-quota-anchor" class="ghost-btn compact-btn" type="button">校准</button>
           </div>
 
           <div id="quota-anchor-editor" class="anchor-editor" hidden>
-            <p class="card-sub" style="margin:0 0 7px">照抄左下角 Usage 弹窗填入（如 <code>68</code> 与 <code>6d 4h</code>），驾驶舱会自动实时倒计时：</p>
             <div class="anchor-grid">
               <label><span>Gemini 周剩余(%)</span><input id="inp-g7d-pct" type="number" min="0" max="100" placeholder="68" class="glass-input" /></label>
-              <label><span>Gemini 周重置</span><input id="inp-g7d-reset" type="text" placeholder="6d 4h" class="glass-input" /></label>
+              <label><span>Gemini 周刷新</span><input id="inp-g7d-reset" type="text" placeholder="6d 4h" class="glass-input" /></label>
               <label><span>Gemini 5h剩余(%)</span><input id="inp-g5h-pct" type="number" min="0" max="100" placeholder="84" class="glass-input" /></label>
-              <label><span>Gemini 5h重置</span><input id="inp-g5h-reset" type="text" placeholder="4h 15m" class="glass-input" /></label>
+              <label><span>Gemini 5h刷新</span><input id="inp-g5h-reset" type="text" placeholder="4h 15m" class="glass-input" /></label>
               <label><span>Claude 周剩余(%)</span><input id="inp-c7d-pct" type="number" min="0" max="100" placeholder="24" class="glass-input" /></label>
-              <label><span>Claude 周重置</span><input id="inp-c7d-reset" type="text" placeholder="6d 4h" class="glass-input" /></label>
+              <label><span>Claude 周刷新</span><input id="inp-c7d-reset" type="text" placeholder="6d 4h" class="glass-input" /></label>
               <label><span>Claude 5h剩余(%)</span><input id="inp-c5h-pct" type="number" min="0" max="100" placeholder="100" class="glass-input" /></label>
-              <label><span>Claude 5h重置</span><input id="inp-c5h-reset" type="text" placeholder="5h" class="glass-input" /></label>
+              <label><span>Claude 5h刷新</span><input id="inp-c5h-reset" type="text" placeholder="5h" class="glass-input" /></label>
             </div>
             <div class="anchor-actions">
-              <button id="btn-clear-anchor" class="ghost-btn compact-btn" type="button">清除同步</button>
-              <button id="btn-save-anchor" class="primary-btn compact-btn" type="button">保存并开始倒计时</button>
+              <button id="btn-clear-anchor" class="ghost-btn compact-btn" type="button">清空</button>
+              <button id="btn-save-anchor" class="primary-btn compact-btn" type="button">保存</button>
             </div>
           </div>
 
           <div id="quota-grid" class="quota-grid"></div>
         </div>
 
-        <!-- WINDOW 2 (STANDALONE): Real-Time Context Window -->
+        <!-- WINDOW 3: Real-Time Context Window -->
         <div class="glass-card">
           <div class="card-header">
-            <div>
-              <h2 class="card-title">实时上下文窗口</h2>
-              <p class="card-sub" id="context-subtitle">当前会话实时占用 · 与累计统计独立</p>
-            </div>
+            <h2 class="card-title">实时上下文窗口</h2>
             <div class="seg-group" id="window-limit-group">
               <button class="seg-btn" data-limit="200000">200k</button>
               <button class="seg-btn active" data-limit="512000">512k</button>
@@ -166,7 +147,7 @@
               </svg>
               <div class="ring-center">
                 <span id="ring-percent" class="ring-percent tabular">0%</span>
-                <span class="ring-label">实时占用</span>
+                <span class="ring-label">已占用</span>
               </div>
             </div>
 
@@ -182,7 +163,7 @@
           <div class="sub-divider"></div>
           <div class="ctx-live-footer">
             <div class="ctx-live-item">
-              <span class="metric-label">当前模型</span>
+              <span class="metric-label">模型</span>
               <span id="ctx-model-badge" class="model-chip">—</span>
             </div>
             <div class="ctx-live-item">
@@ -190,7 +171,7 @@
               <span id="ctx-effort-badge" class="effort-chip">—</span>
             </div>
             <div class="ctx-live-item">
-              <span class="metric-label">生成速率</span>
+              <span class="metric-label">速率</span>
               <span class="speed-inline tabular"><strong id="metric-speed">—</strong> <span class="muted">tok/s</span></span>
             </div>
             <div class="sparkline-mini">
@@ -199,15 +180,12 @@
           </div>
         </div>
 
-        <!-- WINDOW 3: Active CLI & Subagent Live Monitor -->
+        <!-- WINDOW 4: Active CLI & Subagent Monitor -->
         <div class="glass-card">
-          <div class="card-header wrap-header">
-            <div>
-              <div class="title-with-badge">
-                <h2 class="card-title">活动 CLI 与子智能体</h2>
-                <span id="active-agents-badge" class="badge-pill">0 活动中</span>
-              </div>
-              <p class="card-sub">仅展示实时运行中的 Codex CLI / AGY CLI / 子智能体</p>
+          <div class="card-header">
+            <div class="title-with-badge">
+              <h2 class="card-title">活动 CLI 与子智能体</h2>
+              <span id="active-agents-badge" class="badge-pill">0 活动中</span>
             </div>
             <button id="btn-toggle-recent-agents" class="ghost-btn compact-btn" type="button">近期 1h (0)</button>
           </div>
@@ -217,15 +195,11 @@
 
       <!-- ==================== PAGE 2: APPEARANCE STUDIO ==================== -->
       <section id="page-studio" class="page-view">
-        <!-- macOS Full-Window Backdrop Companion (moved cleanly out of topbar!) -->
         <div class="glass-card companion-card">
-          <div class="card-header wrap-header">
-            <div>
-              <div class="title-with-badge">
-                <h2 class="card-title">macOS 整窗氛围伴侣</h2>
-                <span id="companion-status-badge" class="badge-pill">准备就绪</span>
-              </div>
-              <p class="card-sub">星光滤色引擎：壁纸无缝贯穿左右窗口，同时保持代码与文字锐利不发灰</p>
+          <div class="card-header">
+            <div class="title-with-badge">
+              <h2 class="card-title">整窗氛围伴侣</h2>
+              <span id="companion-status-badge" class="badge-pill">准备就绪</span>
             </div>
             <button id="btn-toggle-companion" class="primary-btn" type="button">开启整窗氛围</button>
           </div>
@@ -271,23 +245,22 @@
           <div class="fit-row">
             <span class="fit-label">混合模式</span>
             <div class="seg-group" id="comp-blend-group">
-              <button class="seg-btn active" data-blend="screen">星光滤色（推荐）</button>
+              <button class="seg-btn active" data-blend="screen">星光滤色</button>
               <button class="seg-btn" data-blend="soft">柔雾透叠</button>
             </div>
           </div>
           <p id="companion-error" class="error-text" hidden></p>
         </div>
 
-        <!-- Wallpaper Gallery -->
         <div class="glass-card">
           <div class="card-header wrap-header">
-            <div>
+            <div class="title-with-badge">
               <h2 class="card-title">壁纸画廊</h2>
-              <p class="card-sub" id="active-wallpaper-name">星海夜行电车</p>
+              <span id="active-wallpaper-name" class="badge-pill">星海夜行电车</span>
             </div>
             <div class="header-actions">
-              <button id="btn-random-wp" class="ghost-btn" type="button">随机壁纸</button>
-              <button id="btn-upload-wp" class="ghost-btn" type="button">自定义图片</button>
+              <button id="btn-random-wp" class="ghost-btn" type="button">随机</button>
+              <button id="btn-upload-wp" class="ghost-btn" type="button">上传</button>
               <button id="btn-clear-wp" class="ghost-btn" type="button">清除</button>
               <input id="file-wallpaper" type="file" accept="image/png,image/jpeg,image/webp" hidden />
             </div>
@@ -298,14 +271,14 @@
           <div class="sliders-grid">
             <label class="slider-item">
               <div class="slider-head">
-                <span>侧栏壁纸透明度</span>
+                <span>壁纸透明度</span>
                 <strong id="val-wp-opacity" class="tabular">100%</strong>
               </div>
               <input id="range-wp-opacity" type="range" min="0" max="100" value="100" />
             </label>
             <label class="slider-item">
               <div class="slider-head">
-                <span>玻璃磨砂模糊</span>
+                <span>磨砂模糊</span>
                 <strong id="val-wp-blur" class="tabular">4px</strong>
               </div>
               <input id="range-wp-blur" type="range" min="0" max="24" value="4" />
@@ -319,7 +292,7 @@
             </label>
             <label class="slider-item">
               <div class="slider-head">
-                <span>卡片圆角柔化</span>
+                <span>卡片圆角</span>
                 <strong id="val-wp-radius" class="tabular">12px</strong>
               </div>
               <input id="range-wp-radius" type="range" min="4" max="22" value="12" />
@@ -335,13 +308,9 @@
           </div>
         </div>
 
-        <!-- Palette Presets -->
         <div class="glass-card">
           <div class="card-header wrap-header">
-            <div>
-              <h2 class="card-title">液态玻璃色调</h2>
-              <p class="card-sub">六通道实时配色定制与明暗自适应</p>
-            </div>
+            <h2 class="card-title">液态玻璃色调</h2>
             <div class="header-actions">
               <button id="btn-follow-host" class="toggle-chip" type="button">
                 <span class="status-dot"></span>
@@ -354,8 +323,8 @@
           <div id="preset-pills" class="preset-pills"></div>
 
           <div class="save-preset-row">
-            <input id="input-preset-name" type="text" class="glass-input" placeholder="为当前调色方案命名并保存..." maxlength="24" />
-            <button id="btn-save-preset" class="primary-btn" type="button">保存方案</button>
+            <input id="input-preset-name" type="text" class="glass-input" placeholder="命名并保存当前方案..." maxlength="24" />
+            <button id="btn-save-preset" class="primary-btn" type="button">保存</button>
           </div>
 
           <div id="color-pickers" class="color-grid"></div>

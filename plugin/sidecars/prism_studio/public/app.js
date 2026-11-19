@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_VERSION = '3.2.0';
+  const FRONTEND_VERSION = '3.3.0';
   const COLOR_CHANNELS = [
     { key: 'accent', label: '主强调色' },
     { key: 'secondary', label: '次折射色' },
@@ -430,8 +430,7 @@
     });
 
     const isSessionScope = scope === 'session';
-    $('#stats-source-group').style.display = isSessionScope ? 'none' : 'inline-flex';
-    $('#source-split-strip').style.display = isSessionScope ? 'none' : 'flex';
+    $('#stats-source-row').style.display = isSessionScope ? 'none' : 'flex';
 
     if (!isSessionScope) {
       const split = dataBlock.allBySource || dataBlock.bySource || { gui: 0, agyCli: 0, codexCli: 0 };
@@ -446,18 +445,6 @@
     $('#sum-cache').textContent = formatCompact(dataBlock.cacheRead);
     $('#sum-uncached').textContent = formatCompact(dataBlock.uncachedInput);
     $('#sum-output').textContent = formatCompact(dataBlock.output);
-
-    if (scope === 'session') {
-      $('#stats-scope-caption').textContent = `仅统计当前 GUI 会话：${activeConv?.title || '—'}`;
-    } else if (scope === 'all') {
-      $('#stats-scope-caption').textContent = `汇总全部 ${projects.length} 个项目`;
-    } else {
-      const pInfo = st.project;
-      const parts = [`项目「${pInfo.name}」`, `${pInfo.sessionCount} GUI 会话`];
-      if (pInfo.agyCliCount) parts.push(`${pInfo.agyCliCount} AGY CLI`);
-      if (pInfo.codexCliCount) parts.push(`${pInfo.codexCliCount} Codex`);
-      $('#stats-scope-caption').textContent = parts.join(' · ');
-    }
 
     const models = dataBlock.models || [];
     if (models.length) {
@@ -531,50 +518,66 @@
       switchStrip.hidden = true;
     }
 
-    // ========== WINDOW 2: 5h & WEEKLY QUOTA MONITOR ==========
+    // ========== WINDOW 2: QUOTA MONITOR (Official Usage style: remaining %, used %, reset timer, ring) ==========
     const q = telemetry.quotas;
-    const renderQuotaBox = (group, accentColor) => {
-      const renderWin = (title, win) => {
+    const renderQuotaRing = (leftPct) => {
+      const r = 8.5;
+      const circ = 2 * Math.PI * r;
+      const hasVal = typeof leftPct === 'number';
+      const pct = hasVal ? Math.max(0, Math.min(100, leftPct)) : 0;
+      const dashOffset = circ * (1 - pct / 100);
+      const stroke = !hasVal
+        ? 'rgba(255,255,255,0.22)'
+        : pct <= 15
+        ? '#f87171'
+        : pct <= 35
+        ? 'var(--prism-secondary)'
+        : 'var(--prism-tertiary)';
+      return `
+        <svg class="quota-mini-ring" viewBox="0 0 22 22">
+          <circle class="track" cx="11" cy="11" r="${r}" />
+          <circle class="fill" cx="11" cy="11" r="${r}" stroke="${stroke}" stroke-dasharray="${circ.toFixed(2)}" stroke-dashoffset="${dashOffset.toFixed(2)}" />
+        </svg>
+      `;
+    };
+
+    const renderQuotaBox = (group) => {
+      const renderItem = (title, win) => {
         const a = win.anchor;
-        const barWidth = a ? Math.max(0, Math.min(100, 100 - a.leftPct)) : 0;
-        const barColor = a && a.leftPct < 15 ? '#f87171' : a && a.leftPct < 35 ? 'var(--prism-secondary)' : accentColor;
-        const rightHeadline = a
-          ? `<strong>${a.leftPct}% 剩</strong>`
-          : `<span class="muted">${formatCompact(win.tokens)}</span>`;
-        const subLeft = a
-          ? `同步后 +${formatCompact(a.sinceAnchorTokens)} (${a.sinceAnchorCalls}次)`
-          : `GUI ${formatCompact(win.guiTokens)} · CLI ${formatCompact(win.cliTokens)}`;
-        const subRight = a
-          ? (a.resetAtMs ? formatCountdown(a.resetInMs) : '待填重置时间')
-          : `${win.calls} 次调用`;
+        const leftPct = a ? Math.round(a.leftPct) : null;
+        const usedPct = a ? Math.max(0, 100 - leftPct) : null;
+        const resetLine = a
+          ? a.resetAtMs
+            ? formatCountdown(a.resetInMs)
+            : leftPct === 100
+            ? '已满额'
+            : '未填刷新时间'
+          : '点右上角校准';
         return `
-          <div class="quota-row">
-            <div class="quota-row-top tabular">
-              <span class="muted">${title}</span>
-              <span class="quota-val">${rightHeadline}</span>
+          <div class="quota-item">
+            <div class="quota-left">
+              <span class="quota-name">${title}</span>
+              <span class="quota-reset tabular">${resetLine}</span>
             </div>
-            ${a ? `<div class="quota-bar"><span style="width:${barWidth}%;background:${barColor}"></span></div>` : ''}
-            <div class="quota-sub tabular">
-              <span>${subLeft}</span>
-              <span>${subRight}</span>
+            <div class="quota-right">
+              <div class="quota-pct-col tabular">
+                <span class="quota-pct-main">${leftPct !== null ? `${leftPct}% 剩余` : '—% 剩余'}</span>
+                <span class="quota-pct-used">${usedPct !== null ? `已用 ${usedPct}%` : `总 100%`}</span>
+              </div>
+              ${renderQuotaRing(leftPct)}
             </div>
           </div>
         `;
       };
       return `
         <div class="quota-box">
-          <div class="quota-head">
-            <span>${group.label}</span>
-            <span class="muted" style="font-size:10px">周 / 5h</span>
-          </div>
-          ${renderWin('每周限额', group.d7)}
-          ${renderWin('5小时限额', group.h5)}
+          <div class="quota-head">${group.label}</div>
+          ${renderItem('每周限额', group.d7)}
+          ${renderItem('5小时限额', group.h5)}
         </div>
       `;
     };
-    $('#quota-grid').innerHTML =
-      renderQuotaBox(q.gemini, 'var(--prism-accent)') +
-      renderQuotaBox(q.claude, 'var(--prism-tertiary)');
+    $('#quota-grid').innerHTML = renderQuotaBox(q.gemini) + renderQuotaBox(q.claude);
 
     // ========== WINDOW 3: STANDALONE REAL-TIME CONTEXT ==========
     const ctx = telemetry.context;
@@ -584,7 +587,6 @@
     $('#ring-percent').textContent = `${ctx.percent.toFixed(ctx.percent >= 10 ? 0 : 1)}%`;
     $('#ctx-used').textContent = formatNumber(ctx.used);
     $('#ctx-limit').textContent = formatNumber(ctx.limit);
-    $('#context-subtitle').textContent = `${activeConv?.projectName || '项目'} · ${activeConv?.title || '当前会话'}`;
 
     document.querySelectorAll('#window-limit-group .seg-btn').forEach((b) => {
       b.classList.toggle('active', Number(b.dataset.limit) === Number(ctx.limit));
@@ -812,6 +814,14 @@
     $('#btn-quota-anchor').addEventListener('click', () => {
       const box = $('#quota-anchor-editor');
       box.hidden = !box.hidden;
+      if (!box.hidden && appState?.settings?.quotaAnchor) {
+        const qa = appState.settings.quotaAnchor;
+        const setVal = (id, v) => { if (v !== null && v !== undefined) $(id).value = v; };
+        setVal('#inp-g7d-pct', qa.gemini7d?.leftPct);
+        setVal('#inp-g5h-pct', qa.gemini5h?.leftPct);
+        setVal('#inp-c7d-pct', qa.claude7d?.leftPct);
+        setVal('#inp-c5h-pct', qa.claude5h?.leftPct);
+      }
     });
 
     $('#btn-save-anchor').addEventListener('click', async () => {
