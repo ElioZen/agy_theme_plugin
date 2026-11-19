@@ -15,6 +15,8 @@ struct CompanionConfig: Decodable {
     let fit: String
     let blendStyle: String
     let tintHex: String
+    let accentHex: String?
+    let glassRim: Bool?
     let updatedAt: Double?
 }
 
@@ -22,6 +24,7 @@ final class BackdropCanvasView: NSView {
     private let imageLayer = CALayer()
     private let tintLayer = CALayer()
     private let vignetteLayer = CAGradientLayer()
+    private let rimLayer = CALayer()
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
     private var cachedImageKey: String = ""
@@ -43,12 +46,17 @@ final class BackdropCanvasView: NSView {
         vignetteLayer.endPoint = CGPoint(x: 1.0, y: 1.0)
         vignetteLayer.colors = [
             NSColor.clear.cgColor,
-            NSColor.black.withAlphaComponent(0.45).cgColor
+            NSColor.black.withAlphaComponent(0.32).cgColor
         ]
+
+        rimLayer.backgroundColor = NSColor.clear.cgColor
+        rimLayer.borderWidth = 1.5
+        rimLayer.borderColor = NSColor.clear.cgColor
 
         layer?.addSublayer(imageLayer)
         layer?.addSublayer(tintLayer)
         layer?.addSublayer(vignetteLayer)
+        layer?.addSublayer(rimLayer)
     }
 
     required init?(coder: NSCoder) {
@@ -62,6 +70,7 @@ final class BackdropCanvasView: NSView {
         imageLayer.frame = bounds
         tintLayer.frame = bounds
         vignetteLayer.frame = bounds
+        rimLayer.frame = bounds.insetBy(dx: 0.75, dy: 0.75)
         CATransaction.commit()
     }
 
@@ -118,19 +127,34 @@ final class BackdropCanvasView: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
 
-        layer?.cornerRadius = CGFloat(max(0, min(28, config.cornerRadius)))
+        let radius = CGFloat(max(0, min(28, config.cornerRadius)))
+        layer?.cornerRadius = radius
+        rimLayer.cornerRadius = max(0, radius - 0.75)
+
         imageLayer.contentsGravity = (config.fit == "contain") ? .resizeAspect : .resizeAspectFill
         imageLayer.contents = loadRenderedImage(path: config.imagePath, blur: config.blur)
 
+        let wpOpacity = Float(max(0.0, min(0.70, config.opacity)))
+        imageLayer.opacity = wpOpacity
+
         let tint = parseHexColor(config.tintHex)
-        let softTintAlpha: CGFloat = (config.blendStyle == "soft") ? 0.16 : 0.04
+        let softTintAlpha: CGFloat = (config.blendStyle == "soft") ? 0.14 : 0.04
         tintLayer.backgroundColor = tint.withAlphaComponent(softTintAlpha).cgColor
 
-        let vig = CGFloat(max(0, min(0.85, config.vignette)))
+        let vig = CGFloat(max(0, min(0.75, config.vignette))) * CGFloat(max(0.25, wpOpacity))
         vignetteLayer.colors = [
             NSColor.clear.cgColor,
             NSColor.black.withAlphaComponent(vig).cgColor
         ]
+
+        if config.glassRim ?? true {
+            let accent = parseHexColor(config.accentHex ?? "#6EA8FF")
+            rimLayer.borderWidth = 1.5
+            rimLayer.borderColor = accent.withAlphaComponent(0.55).cgColor
+        } else {
+            rimLayer.borderWidth = 0
+            rimLayer.borderColor = NSColor.clear.cgColor
+        }
 
         CATransaction.commit()
     }
@@ -167,12 +191,12 @@ final class BackdropController: NSObject {
         window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle, .stationary]
         window.contentView = canvasView
-        window.alphaValue = 0.22
+        window.alphaValue = 1.0
         window.orderOut(nil)
 
         reloadConfig(force: true)
 
-        Timer.scheduledTimer(withTimeInterval: 0.12, repeats: true) { [weak self] _ in
+        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             self?.tick()
         }
     }
@@ -195,7 +219,6 @@ final class BackdropController: NSObject {
         }
         config = decoded
         canvasView.apply(config: decoded)
-        window.alphaValue = CGFloat(max(0.04, min(0.68, decoded.opacity)))
     }
 
     private func isAntigravityFrontmost() -> Bool {
@@ -224,7 +247,6 @@ final class BackdropController: NSObject {
             }
             if rect.width < 360 || rect.height < 260 { continue }
 
-            // Convert Quartz top-left origin to AppKit bottom-left origin
             let appKitY = primaryHeight - (rect.origin.y + rect.size.height)
             return NSRect(x: rect.origin.x, y: appKitY, width: rect.size.width, height: rect.size.height)
         }
@@ -246,7 +268,7 @@ final class BackdropController: NSObject {
 
         reloadConfig(force: false)
 
-        guard let cfg = config, cfg.enabled, !cfg.imagePath.isEmpty else {
+        guard let cfg = config, cfg.enabled else {
             hideWindow()
             return
         }

@@ -25,9 +25,12 @@
   - 基于原生 Swift `AppKit` 编写的轻量级鼠标穿透窗口（`PrismBackdrop.swift`）。
   - 自动追踪 Antigravity 窗口坐标并贴合圆角，切到其他应用时自动隐藏，零修改 Electron 本体。
 
-### 3. 中文速查与规则助手
-- 一键复制「简体中文回复」全局 Rules 模板。
-- 内置 Antigravity 原生英文菜单、权限选项与斜杠命令中文检索速查表。
+### 3. 效率台（多项目监视与快捷指令）
+- **多项目会话监视**：置顶常用会话、一眼分辨运行中/空闲项目并一键跳转。
+- **快捷发起新对话**：指定模型直接新开任务，不打断当前页面。
+- **常用指令模板**：自定义常用 Prompt，点击一键发送到当前对话。
+
+> **关于 Antigravity 原生英文主界面汉化**：Antigravity 2.0 目前未开放宿主 UI 语言包插件接口。本插件自身为纯简体中文界面且零侵入主程序；如需汉化 Antigravity 顶部原生菜单与设置页，可在不运行关键任务时参考社区开源的 Electron ASAR 汉化项目（如 `qqxpee/antigravity2-cn`、`Silas-02/antigravity-desktop-cn`）。
 
 ## 安装方式（macOS）
 

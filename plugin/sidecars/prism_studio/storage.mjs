@@ -141,12 +141,13 @@ export const DEFAULT_SETTINGS = {
   },
   companion: {
     enabled: false,
-    opacity: 22,
+    opacity: 26,
     blur: 0,
-    vignette: 32,
+    vignette: 28,
     onlyWhenFrontmost: true,
     fit: 'cover',
     blendStyle: 'crisp', // 'crisp' | 'soft'
+    glassRim: true,
   },
   telemetry: {
     followLatest: true,
@@ -155,6 +156,23 @@ export const DEFAULT_SETTINGS = {
     range: 'today',
   },
   pinnedConversations: [],
+  quickPrompts: [
+    {
+      id: 'zh-only',
+      title: '本轮简体中文回复',
+      body: '请全程使用自然简洁的简体中文回复，代码标识符与命令保持原文。',
+    },
+    {
+      id: 'review-diff',
+      title: '代码改动快速审查',
+      body: '请检查当前工作区的 git diff，重点指出潜在 bug、边界条件和可优化点，用简体中文简要列出。',
+    },
+    {
+      id: 'summarize-progress',
+      title: '总结当前进展',
+      body: '请用 5 条以内的要点总结目前已完成的内容、未完成事项以及下一步建议。',
+    },
+  ],
 };
 
 function deepMerge(base, patch) {
@@ -308,6 +326,8 @@ export class PrismStorage {
       fit: settings.companion?.fit || settings.wallpaper?.fit || 'cover',
       blendStyle: settings.companion?.blendStyle || 'crisp',
       tintHex: settings.colors?.canvas || '#0B101D',
+      accentHex: settings.colors?.accent || '#6EA8FF',
+      glassRim: settings.companion?.glassRim !== false,
       updatedAt: Date.now(),
     };
     this.#writeAtomic(this.companionConfigPath, JSON.stringify(payload, null, 2));

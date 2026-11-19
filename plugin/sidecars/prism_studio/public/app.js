@@ -1,121 +1,11 @@
 (() => {
-  const I18N = {
-    'zh-CN': {
-      'tab.cockpit': '驾驶舱',
-      'tab.studio': '棱镜工坊',
-      'tab.guide': '中文速查',
-      'cockpit.followLatest': '跟随最新',
-      'cockpit.contextTitle': '上下文窗口占用',
-      'cockpit.contextShort': '已占用',
-      'cockpit.telemetryTitle': '速率与缓存遥测',
-      'cockpit.cacheHit': '缓存命中率',
-      'cockpit.speed': '生成速率',
-      'cockpit.usageTitle': '模型 Token 用量',
-      'cockpit.scopeAll': '全部',
-      'cockpit.scopeCurrent': '当前',
-      'cockpit.today': '今天',
-      'cockpit.7d': '近7天',
-      'cockpit.30d': '近30天',
-      'cockpit.cacheRead': '缓存命中',
-      'cockpit.uncached': '未命中',
-      'cockpit.output': '输出',
-      'cockpit.costNote': '* 费用为按公开 API 单价估算的参考值，本地只读统计，不产生额外请求。',
-      'cockpit.sessionsTitle': '多项目会话监视',
-      'studio.paletteTitle': '液态玻璃色调',
-      'studio.paletteSub': '六通道实时配色定制与明暗自适应',
-      'studio.followHost': '跟随宿主明暗',
-      'studio.reset': '还原默认',
-      'studio.savePreset': '保存方案',
-      'studio.previewTitle': '液态玻璃效果预览',
-      'studio.wallpaperTitle': '壁纸画廊',
-      'studio.randomWp': '随机壁纸',
-      'studio.uploadWp': '自定义图片',
-      'studio.clearWp': '清除',
-      'studio.opacity': '壁纸透明度',
-      'studio.blur': '玻璃磨砂模糊',
-      'studio.darkness': '暗度护眼遮罩',
-      'studio.radius': '卡片圆角柔化',
-      'studio.fitMode': '壁纸适配',
-      'studio.fitCover': '铺满裁剪',
-      'studio.fitContain': '完整居中',
-      'studio.companionTitle': 'macOS 整窗氛围伴侣',
-      'studio.companionSub': '原生鼠标穿透层 · 自动贴合 Antigravity 窗口 · 零侵入不重启',
-      'studio.compOpacity': '整窗壁纸浓度',
-      'studio.compVignette': '边缘护眼暗角',
-      'studio.compBlur': '整窗柔焦',
-      'studio.compFrontmost': '切到其他应用时自动隐藏',
-    },
-    en: {
-      'tab.cockpit': 'Cockpit',
-      'tab.studio': 'Glass Studio',
-      'tab.guide': 'ZH Guide',
-      'cockpit.followLatest': 'Follow Latest',
-      'cockpit.contextTitle': 'Context Window',
-      'cockpit.contextShort': 'Used',
-      'cockpit.telemetryTitle': 'Model Telemetry',
-      'cockpit.cacheHit': 'Cache Hit',
-      'cockpit.speed': 'Speed',
-      'cockpit.usageTitle': 'Model Token Usage',
-      'cockpit.scopeAll': 'All',
-      'cockpit.scopeCurrent': 'Current',
-      'cockpit.today': 'Today',
-      'cockpit.7d': '7d',
-      'cockpit.30d': '30d',
-      'cockpit.cacheRead': 'Cache Hit',
-      'cockpit.uncached': 'Uncached',
-      'cockpit.output': 'Output',
-      'cockpit.costNote': '* Reference cost estimate based on public API rates; strictly local read-only telemetry.',
-      'cockpit.sessionsTitle': 'Parallel Sessions',
-      'studio.paletteTitle': 'Liquid Glass Palette',
-      'studio.paletteSub': '6-channel live theming with light/dark adaptation',
-      'studio.followHost': 'Follow Host',
-      'studio.reset': 'Reset',
-      'studio.savePreset': 'Save Preset',
-      'studio.previewTitle': 'Live Glass Preview',
-      'studio.wallpaperTitle': 'Wallpaper Gallery',
-      'studio.randomWp': 'Random',
-      'studio.uploadWp': 'Upload Image',
-      'studio.clearWp': 'Clear',
-      'studio.opacity': 'Wallpaper Opacity',
-      'studio.blur': 'Glass Blur',
-      'studio.darkness': 'Readability Scrim',
-      'studio.radius': 'Card Radius',
-      'studio.fitMode': 'Fit Mode',
-      'studio.fitCover': 'Cover',
-      'studio.fitContain': 'Contain',
-      'studio.companionTitle': 'macOS Backdrop Companion',
-      'studio.companionSub': 'Native click-through overlay synced to Antigravity window bounds',
-      'studio.compOpacity': 'Window Opacity',
-      'studio.compVignette': 'Edge Vignette',
-      'studio.compBlur': 'Overlay Blur',
-      'studio.compFrontmost': 'Auto-hide when switching apps',
-    },
-  };
-
   const COLOR_CHANNELS = [
-    { key: 'accent', zh: '主强调色', en: 'Primary Accent' },
-    { key: 'secondary', zh: '次折射色', en: 'Secondary Glow' },
-    { key: 'tertiary', zh: '状态点缀', en: 'Status Mint' },
-    { key: 'canvas', zh: '画布底色', en: 'Canvas Base' },
-    { key: 'surface', zh: '顶栏玻璃', en: 'Surface Glass' },
-    { key: 'card', zh: '卡片玻璃', en: 'Card Glass' },
-  ];
-
-  const GLOSSARY = [
-    { en: 'Customizations', zh: '自定义配置', desc: '统一管理 Plugins（插件）、Skills（技能）、Rules（规则）与 MCP 服务。' },
-    { en: 'Rules / AGENTS.md', zh: '全局与项目规则', desc: '自动注入上下文的常驻指令（例如要求 AI 始终使用简体中文回复）。' },
-    { en: 'Skills', zh: '按需技能包', desc: '仅在任务相关时按需加载的专业工作流说明，节省上下文窗口。' },
-    { en: 'Tool Execution Policy', zh: '工具执行策略', desc: '控制终端命令是否需要人工确认（always-proceed / request-review / strict / sandbox）。' },
-    { en: 'Terminal Sandbox', zh: '终端沙盒模式', desc: '将 Agent 执行的命令隔离在受限安全沙盒内运行。' },
-    { en: 'Non-Workspace File Access', zh: '工作区外文件权限', desc: '控制 Agent 是否允许读写当前项目目录之外的本机文件。' },
-    { en: '/plan', zh: '深度规划模式', desc: '复杂任务前先输出清晰的分步方案，确认后再动手。' },
-    { en: '/goal', zh: '长任务目标模式', desc: '适合耗时较长的端到端任务，持续推进直到目标彻底完成。' },
-    { en: '/compact', zh: '压缩上下文', desc: '当上下文窗口占比偏高时，智能总结历史对话以释放空间。' },
-    { en: '/grill-me', zh: '交互式需求访谈', desc: '通过逐条提问帮你理清模糊需求与关键架构决策。' },
-    { en: '/teamwork', zh: '多智能体协作', desc: '将大型任务拆解给多个并行 Agent 协同推进。' },
-    { en: '/boost', zh: '深度强化模式', desc: '启用多视角深度思考与更严格的交叉验证。' },
-    { en: '/schedule', zh: '定时与周期任务', desc: '创建一次性倒计时提醒或 Cron 周期自动任务。' },
-    { en: 'Auxiliary Pane (⌘B)', zh: '辅助侧边栏', desc: '右侧面板区域，用来展示插件界面、产物、变更文件与终端。' },
+    { key: 'accent', label: '主强调色' },
+    { key: 'secondary', label: '次折射色' },
+    { key: 'tertiary', label: '状态点缀' },
+    { key: 'canvas', label: '画布底色' },
+    { key: 'surface', label: '顶栏玻璃' },
+    { key: 'card', label: '卡片玻璃' },
   ];
 
   let appState = null;
@@ -165,8 +55,15 @@
     if (min < 60) return `${min} 分钟前`;
     const hr = Math.floor(min / 60);
     if (hr < 24) return `${hr} 小时前`;
-    const day = Math.floor(hr / 24);
-    return `${day} 天前`;
+    return `${Math.floor(hr / 24)} 天前`;
+  }
+
+  function escapeHtml(str) {
+    return String(str || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
   }
 
   function isLightColor(hex) {
@@ -175,11 +72,22 @@
     const r = parseInt(clean.slice(0, 2), 16);
     const g = parseInt(clean.slice(2, 4), 16);
     const b = parseInt(clean.slice(4, 6), 16);
-    const luma = 0.299 * r + 0.587 * g + 0.114 * b;
-    return luma > 165;
+    return 0.299 * r + 0.587 * g + 0.114 * b > 165;
   }
 
-  // Detect host theme changes pushed by sidecar preload
+  function deepMergeLocal(base, patch) {
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return base;
+    const out = Array.isArray(base) ? [...base] : { ...base };
+    for (const [k, v] of Object.entries(patch)) {
+      if (v && typeof v === 'object' && !Array.isArray(v) && base?.[k] && typeof base[k] === 'object' && !Array.isArray(base[k])) {
+        out[k] = deepMergeLocal(base[k], v);
+      } else {
+        out[k] = v;
+      }
+    }
+    return out;
+  }
+
   window.addEventListener('message', (event) => {
     if (event.data?.type === 'theme-change') {
       const bg = event.data.payload?.cssVariables?.['--background'] || '';
@@ -195,22 +103,11 @@
     }
   });
 
-  function applyI18n(lang) {
-    const dict = I18N[lang] || I18N['zh-CN'];
-    document.querySelectorAll('[data-i18n]').forEach((el) => {
-      const key = el.getAttribute('data-i18n');
-      if (dict[key]) el.textContent = dict[key];
-    });
-    $('#btn-lang').textContent = lang === 'en' ? 'EN' : '中';
-  }
-
   function applyThemeToDOM(settings) {
     const root = document.documentElement;
     const colors = settings.colors || {};
     let lightMode = isLightColor(colors.canvas);
-    if (settings.followHostTheme) {
-      lightMode = hostIsLight;
-    }
+    if (settings.followHostTheme) lightMode = hostIsLight;
 
     document.body.classList.toggle('theme-light', lightMode);
 
@@ -250,7 +147,6 @@
 
   function queueSaveSettings(patch, immediate = false) {
     if (!appState) return;
-    // Optimistic local merge
     appState.settings = deepMergeLocal(appState.settings, patch);
     applyThemeToDOM(appState.settings);
 
@@ -264,43 +160,26 @@
         if (res.ok) {
           appState = await res.json();
           renderStudio();
+          renderWorkbench();
         }
       } catch (err) {
         console.error('Failed to save settings:', err);
       }
     };
     if (immediate) run();
-    else saveTimer = setTimeout(run, 180);
-  }
-
-  function deepMergeLocal(base, patch) {
-    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return base;
-    const out = Array.isArray(base) ? [...base] : { ...base };
-    for (const [k, v] of Object.entries(patch)) {
-      if (v && typeof v === 'object' && !Array.isArray(v) && base?.[k] && typeof base[k] === 'object' && !Array.isArray(base[k])) {
-        out[k] = deepMergeLocal(base[k], v);
-      } else {
-        out[k] = v;
-      }
-    }
-    return out;
+    else saveTimer = setTimeout(run, 160);
   }
 
   // ==================== RENDER: STUDIO ====================
   function renderStudio() {
     if (!appState) return;
     const { settings, builtinPresets, builtinWallpapers, customWallpapers, companion } = appState;
-    const lang = settings.language || 'zh-CN';
-    applyI18n(lang);
     applyThemeToDOM(settings);
 
     $('#btn-follow-host').classList.toggle('active', Boolean(settings.followHostTheme));
 
     // Presets
     const allPresets = [...builtinPresets, ...(settings.customPresets || [])];
-    const activePreset = allPresets.find((p) => p.id === settings.presetId);
-    $('#preview-preset-name').textContent = activePreset ? activePreset.name : '自定义配色';
-
     $('#preset-pills').innerHTML = allPresets
       .map((p) => {
         const active = settings.presetId === p.id;
@@ -324,7 +203,7 @@
       return `
         <div class="color-cell">
           <div class="color-cell-info">
-            <div class="color-cell-label">${lang === 'en' ? ch.en : ch.zh}</div>
+            <div class="color-cell-label">${ch.label}</div>
             <div class="color-cell-hex">${hex}</div>
           </div>
           <input type="color" data-color-key="${ch.key}" value="${hex}" />
@@ -358,7 +237,7 @@
       })
       .join('');
 
-    // Sliders
+    // Wallpaper sliders
     $('#range-wp-opacity').value = wp.opacity ?? 92;
     $('#val-wp-opacity').textContent = `${wp.opacity ?? 92}%`;
     $('#range-wp-blur').value = wp.blur ?? 14;
@@ -374,29 +253,34 @@
 
     // Companion
     const comp = settings.companion || {};
-    $('#range-comp-opacity').value = comp.opacity ?? 22;
-    $('#val-comp-opacity').textContent = `${comp.opacity ?? 22}%`;
-    $('#range-comp-vignette').value = comp.vignette ?? 32;
-    $('#val-comp-vignette').textContent = `${comp.vignette ?? 32}%`;
+    $('#range-comp-opacity').value = comp.opacity ?? 26;
+    $('#val-comp-opacity').textContent = `${comp.opacity ?? 26}%`;
+    $('#range-comp-vignette').value = comp.vignette ?? 28;
+    $('#val-comp-vignette').textContent = `${comp.vignette ?? 28}%`;
     $('#range-comp-blur').value = comp.blur ?? 0;
     $('#val-comp-blur').textContent = `${comp.blur ?? 0}px`;
+    $('#chk-comp-rim').checked = comp.glassRim !== false;
     $('#chk-comp-frontmost').checked = comp.onlyWhenFrontmost !== false;
 
     const badge = $('#companion-status-badge');
     const toggleBtn = $('#btn-toggle-companion');
+    const topBtn = $('#btn-top-companion');
     const errEl = $('#companion-error');
     badge.classList.remove('running', 'warn');
+
+    const isCompanionActive = Boolean(companion?.running && comp.enabled);
+    topBtn.classList.toggle('active', isCompanionActive);
 
     if (!companion?.supported) {
       badge.textContent = '仅支持 macOS';
       toggleBtn.disabled = true;
       toggleBtn.textContent = '当前系统不支持';
     } else if (companion.status === 'compiling') {
-      badge.textContent = '首次编译中...';
+      badge.textContent = '编译中...';
       badge.classList.add('warn');
       toggleBtn.textContent = '正在准备...';
-    } else if (companion.running && comp.enabled) {
-      badge.textContent = '● 运行中 · 追踪窗口';
+    } else if (isCompanionActive) {
+      badge.textContent = '● 运行中 · 已覆盖整窗';
       badge.classList.add('running');
       toggleBtn.textContent = '关闭整窗伴侣';
       toggleBtn.classList.add('is-active-danger');
@@ -459,7 +343,6 @@
 
     $('#btn-follow-latest').classList.toggle('active', Boolean(telCfg.followLatest));
 
-    // Conversation select
     const select = $('#select-conversation');
     const convs = telemetry.conversations || [];
     select.innerHTML = convs.length
@@ -566,10 +449,17 @@
         })
         .join('');
     }
+  }
 
-    // Sessions list (pinned first, then running, then recent)
+  // ==================== RENDER: WORKBENCH ====================
+  function renderWorkbench() {
+    if (!appState) return;
+    const settings = appState.settings;
+    const convs = telemetry?.conversations || [];
+    const activeConv = telemetry?.activeConversation;
     const pinnedSet = new Set(settings.pinnedConversations || []);
     const runningCount = convs.filter((c) => c.isRunning).length;
+
     $('#running-count-badge').textContent = `${runningCount} 运行中`;
 
     const sortedConvs = [...convs]
@@ -580,63 +470,48 @@
         if (a.isRunning !== b.isRunning) return a.isRunning ? -1 : 1;
         return b.lastModifiedMs - a.lastModifiedMs;
       })
-      .slice(0, 10);
+      .slice(0, 12);
 
-    $('#sessions-list').innerHTML = sortedConvs
-      .map((c) => {
-        const pinned = pinnedSet.has(c.id);
-        const isCurrent = c.id === activeConv?.id;
-        return `
-          <div class="session-item ${isCurrent ? 'is-current' : ''}" data-open-conv="${escapeHtml(c.id)}">
-            <div class="session-meta">
-              <div class="session-title">${escapeHtml(c.title)}</div>
-              <div class="session-sub">${escapeHtml(c.workspace)} · ${c.stepCount} 步 · ${formatRelativeTime(c.lastModifiedMs)}</div>
-            </div>
-            <div class="session-actions">
-              <span class="badge-pill ${c.isRunning ? 'running' : ''}">${c.statusLabel}</span>
-              <button type="button" class="star-btn ${pinned ? 'pinned' : ''}" data-pin-conv="${escapeHtml(c.id)}" title="置顶会话">${pinned ? '★' : '☆'}</button>
-            </div>
-          </div>
-        `;
-      })
-      .join('');
-  }
+    $('#sessions-list').innerHTML = sortedConvs.length
+      ? sortedConvs
+          .map((c) => {
+            const pinned = pinnedSet.has(c.id);
+            const isCurrent = c.id === activeConv?.id;
+            return `
+              <div class="session-item ${isCurrent ? 'is-current' : ''}" data-open-conv="${escapeHtml(c.id)}">
+                <div class="session-meta">
+                  <div class="session-title">${escapeHtml(c.title)}</div>
+                  <div class="session-sub">${escapeHtml(c.workspace)} · ${c.stepCount} 步 · ${formatRelativeTime(c.lastModifiedMs)}</div>
+                </div>
+                <div class="session-actions">
+                  <span class="badge-pill ${c.isRunning ? 'running' : ''}">${c.statusLabel}</span>
+                  <button type="button" class="star-btn ${pinned ? 'pinned' : ''}" data-pin-conv="${escapeHtml(c.id)}" title="置顶会话">${pinned ? '★' : '☆'}</button>
+                </div>
+              </div>
+            `;
+          })
+          .join('')
+      : `<div class="card-sub">暂无本地会话</div>`;
 
-  // ==================== RENDER: GLOSSARY ====================
-  function renderGlossary(query = '') {
-    const q = query.trim().toLowerCase();
-    const list = q
-      ? GLOSSARY.filter(
-          (g) =>
-            g.en.toLowerCase().includes(q) ||
-            g.zh.toLowerCase().includes(q) ||
-            g.desc.toLowerCase().includes(q),
-        )
-      : GLOSSARY;
-
-    $('#glossary-list').innerHTML = list.length
-      ? list
+    const prompts = settings.quickPrompts || [];
+    $('#prompts-list').innerHTML = prompts.length
+      ? prompts
           .map(
-            (g) => `
-          <div class="glossary-item">
-            <div class="glossary-top">
-              <span class="glossary-en">${escapeHtml(g.en)}</span>
-              <span class="glossary-zh">${escapeHtml(g.zh)}</span>
+            (p) => `
+          <div class="prompt-item">
+            <div class="prompt-info">
+              <div class="prompt-title">${escapeHtml(p.title)}</div>
+              <div class="prompt-body">${escapeHtml(p.body)}</div>
             </div>
-            <div class="glossary-desc">${escapeHtml(g.desc)}</div>
+            <div class="prompt-actions">
+              <button type="button" class="ghost-btn" data-send-prompt="${escapeHtml(p.id)}">发送</button>
+              <button type="button" class="icon-pill" data-del-prompt="${escapeHtml(p.id)}" title="删除">×</button>
+            </div>
           </div>
         `,
           )
           .join('')
-      : `<div class="glossary-item"><div class="glossary-desc">未找到匹配词条</div></div>`;
-  }
-
-  function escapeHtml(str) {
-    return String(str || '')
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+      : `<div class="card-sub">暂无常用指令，可在下方添加</div>`;
   }
 
   // ==================== DATA FETCHING ====================
@@ -645,6 +520,7 @@
     if (!res.ok) throw new Error('Failed to load state');
     appState = await res.json();
     renderStudio();
+    renderWorkbench();
   }
 
   async function loadTelemetry() {
@@ -656,9 +532,7 @@
       range: tel.range || 'today',
       windowLimit: String(tel.windowLimit || 512000),
     });
-    if (selectedConversationId) {
-      params.set('conversationId', selectedConversationId);
-    }
+    if (selectedConversationId) params.set('conversationId', selectedConversationId);
     const res = await apiFetch(`/api/telemetry?${params.toString()}`, { method: 'GET' });
     if (!res.ok) return;
     telemetry = await res.json();
@@ -666,11 +540,26 @@
       selectedConversationId = telemetry.activeConversation.id;
     }
     renderCockpit();
+    renderWorkbench();
+  }
+
+  async function toggleCompanion() {
+    const isRunning = Boolean(appState?.companion?.running && appState?.settings?.companion?.enabled);
+    const action = isRunning ? 'stop' : 'start';
+    showToast(action === 'start' ? '正在开启整窗氛围伴侣...' : '正在关闭整窗氛围伴侣...');
+    const res = await apiFetch('/api/companion', {
+      method: 'POST',
+      body: JSON.stringify({ action }),
+    });
+    if (res.ok) {
+      appState = await res.json();
+      renderStudio();
+      showToast(appState.companion?.running ? '整窗氛围伴侣已覆盖整个窗口 ✨' : '整窗氛围伴侣已关闭');
+    }
   }
 
   // ==================== EVENT BINDINGS ====================
   function bindEvents() {
-    // Top tabs
     document.querySelectorAll('.nav-tab').forEach((btn) => {
       btn.addEventListener('click', () => {
         const target = btn.dataset.tab;
@@ -684,14 +573,9 @@
       });
     });
 
-    // Language switch
-    $('#btn-lang').addEventListener('click', () => {
-      const next = appState.settings.language === 'en' ? 'zh-CN' : 'en';
-      queueSaveSettings({ language: next }, true);
-      showToast(next === 'en' ? 'Switched to English' : '已切换为简体中文');
-    });
+    $('#btn-top-companion').addEventListener('click', toggleCompanion);
+    $('#btn-toggle-companion').addEventListener('click', toggleCompanion);
 
-    // Manual refresh
     $('#btn-refresh').addEventListener('click', async () => {
       await Promise.all([loadState(), loadTelemetry()]);
       showToast('数据已刷新');
@@ -731,35 +615,7 @@
       await loadTelemetry();
     });
 
-    // Session open & pin
-    $('#sessions-list').addEventListener('click', async (e) => {
-      const pinBtn = e.target.closest('[data-pin-conv]');
-      if (pinBtn) {
-        e.stopPropagation();
-        const convId = pinBtn.dataset.pinConv;
-        const res = await apiFetch('/api/pin', {
-          method: 'POST',
-          body: JSON.stringify({ conversationId: convId }),
-        });
-        if (res.ok) {
-          appState = await res.json();
-          renderCockpit();
-        }
-        return;
-      }
-      const item = e.target.closest('[data-open-conv]');
-      if (item) {
-        const convId = item.dataset.openConv;
-        if (window.sidecar?.ui?.toggleConversation) {
-          window.sidecar.ui.toggleConversation(convId);
-        }
-        selectedConversationId = convId;
-        await queueSaveSettings({ telemetry: { followLatest: false } }, true);
-        await loadTelemetry();
-      }
-    });
-
-    // Studio: Follow host / Reset
+    // Studio: Palettes & Colors
     $('#btn-follow-host').addEventListener('click', () => {
       queueSaveSettings({ followHostTheme: !appState.settings.followHostTheme }, true);
     });
@@ -773,7 +629,6 @@
       }
     });
 
-    // Preset click / delete
     $('#preset-pills').addEventListener('click', async (e) => {
       const del = e.target.closest('[data-del-preset]');
       if (del) {
@@ -798,13 +653,9 @@
       showToast(`已切换「${found.name}」`);
     });
 
-    // Save custom preset
     $('#btn-save-preset').addEventListener('click', async () => {
       const name = $('#input-preset-name').value.trim();
-      if (!name) {
-        showToast('请先输入方案名称');
-        return;
-      }
+      if (!name) return showToast('请先输入方案名称');
       const res = await apiFetch('/api/presets/save', {
         method: 'POST',
         body: JSON.stringify({
@@ -821,7 +672,6 @@
       }
     });
 
-    // Color picker live change
     $('#color-pickers').addEventListener('input', (e) => {
       const input = e.target.closest('input[type="color"]');
       if (!input) return;
@@ -831,7 +681,7 @@
       queueSaveSettings({ presetId: 'custom', colors: { [key]: hex } }, false);
     });
 
-    // Wallpaper click / delete
+    // Studio: Wallpapers
     $('#wallpaper-grid').addEventListener('click', async (e) => {
       const del = e.target.closest('[data-del-wp]');
       if (del) {
@@ -852,7 +702,6 @@
       queueSaveSettings({ wallpaper: { kind: card.dataset.wpKind, id: card.dataset.wpId } }, true);
     });
 
-    // Random / Upload / Clear wallpaper
     $('#btn-random-wp').addEventListener('click', () => {
       const all = [
         ...appState.builtinWallpapers.map((w) => ({ kind: 'builtin', id: w.id, name: w.name })),
@@ -872,13 +721,10 @@
     });
 
     $('#btn-upload-wp').addEventListener('click', () => $('#file-wallpaper').click());
-    $('#file-wallpaper').addEventListener('change', async (e) => {
+    $('#file-wallpaper').addEventListener('change', (e) => {
       const file = e.target.files?.[0];
       if (!file) return;
-      if (file.size > 15 * 1024 * 1024) {
-        showToast('图片不能超过 15MB');
-        return;
-      }
+      if (file.size > 15 * 1024 * 1024) return showToast('图片不能超过 15MB');
       const reader = new FileReader();
       reader.onload = async () => {
         try {
@@ -902,7 +748,6 @@
       reader.readAsDataURL(file);
     });
 
-    // Wallpaper sliders
     const bindSlider = (id, readoutId, unit, pathBuilder) => {
       const input = $(id);
       input.addEventListener('input', () => {
@@ -916,6 +761,9 @@
     bindSlider('#range-wp-blur', '#val-wp-blur', 'px', (v) => ({ wallpaper: { blur: v } }));
     bindSlider('#range-wp-darkness', '#val-wp-darkness', '%', (v) => ({ wallpaper: { darkness: v } }));
     bindSlider('#range-wp-radius', '#val-wp-radius', 'px', (v) => ({ wallpaper: { radius: v } }));
+    bindSlider('#range-comp-opacity', '#val-comp-opacity', '%', (v) => ({ companion: { opacity: v } }));
+    bindSlider('#range-comp-vignette', '#val-comp-vignette', '%', (v) => ({ companion: { vignette: v } }));
+    bindSlider('#range-comp-blur', '#val-comp-blur', 'px', (v) => ({ companion: { blur: v } }));
 
     $('#wp-fit-group').addEventListener('click', (e) => {
       const btn = e.target.closest('.seg-btn');
@@ -923,47 +771,111 @@
       queueSaveSettings({ wallpaper: { fit: btn.dataset.fit }, companion: { fit: btn.dataset.fit } }, true);
     });
 
-    // Companion sliders & toggle
-    bindSlider('#range-comp-opacity', '#val-comp-opacity', '%', (v) => ({ companion: { opacity: v } }));
-    bindSlider('#range-comp-vignette', '#val-comp-vignette', '%', (v) => ({ companion: { vignette: v } }));
-    bindSlider('#range-comp-blur', '#val-comp-blur', 'px', (v) => ({ companion: { blur: v } }));
+    $('#chk-comp-rim').addEventListener('change', (e) => {
+      queueSaveSettings({ companion: { glassRim: e.target.checked } }, true);
+    });
 
     $('#chk-comp-frontmost').addEventListener('change', (e) => {
       queueSaveSettings({ companion: { onlyWhenFrontmost: e.target.checked } }, true);
     });
 
-    $('#btn-toggle-companion').addEventListener('click', async () => {
-      const isRunning = Boolean(appState?.companion?.running && appState?.settings?.companion?.enabled);
-      const action = isRunning ? 'stop' : 'start';
-      showToast(action === 'start' ? '正在启动 macOS 整窗氛围伴侣...' : '正在关闭整窗氛围伴侣...');
-      const res = await apiFetch('/api/companion', {
-        method: 'POST',
-        body: JSON.stringify({ action }),
-      });
-      if (res.ok) {
-        appState = await res.json();
-        renderStudio();
-        showToast(appState.companion?.running ? '整窗氛围伴侣已开启 ✨' : '整窗氛围伴侣已关闭');
+    // Workbench: Sessions
+    $('#sessions-list').addEventListener('click', async (e) => {
+      const pinBtn = e.target.closest('[data-pin-conv]');
+      if (pinBtn) {
+        e.stopPropagation();
+        const res = await apiFetch('/api/pin', {
+          method: 'POST',
+          body: JSON.stringify({ conversationId: pinBtn.dataset.pinConv }),
+        });
+        if (res.ok) {
+          appState = await res.json();
+          renderWorkbench();
+        }
+        return;
+      }
+      const item = e.target.closest('[data-open-conv]');
+      if (item) {
+        const convId = item.dataset.openConv;
+        if (window.sidecar?.ui?.toggleConversation) {
+          window.sidecar.ui.toggleConversation(convId);
+        }
+        selectedConversationId = convId;
+        await queueSaveSettings({ telemetry: { followLatest: false } }, true);
+        await loadTelemetry();
       }
     });
 
-    // Guide tab
-    $('#input-glossary-search').addEventListener('input', (e) => renderGlossary(e.target.value));
-    $('#btn-copy-rule').addEventListener('click', async () => {
-      const text = $('#zh-rule-snippet').textContent;
+    // Workbench: Start new conversation
+    $('#btn-start-conv').addEventListener('click', async () => {
+      const msg = $('#input-new-conv').value.trim();
+      if (!msg) return showToast('请输入新对话的任务内容');
+      const model = $('#select-new-model').value;
       try {
-        await navigator.clipboard.writeText(text);
-        showToast('已复制中文回复规则，可粘贴到 Rules');
-      } catch {
-        showToast('请手动选中上方规则复制');
+        await apiFetch('/_sidecar/new-conversation', {
+          method: 'POST',
+          body: JSON.stringify({ message: msg, model }),
+        });
+        $('#input-new-conv').value = '';
+        showToast('已发起新对话');
+        setTimeout(loadTelemetry, 1200);
+      } catch (err) {
+        showToast(`发起失败：${err.message}`);
+      }
+    });
+
+    // Workbench: Quick Prompts
+    $('#prompts-list').addEventListener('click', async (e) => {
+      const del = e.target.closest('[data-del-prompt]');
+      if (del) {
+        const res = await apiFetch('/api/prompts/delete', {
+          method: 'POST',
+          body: JSON.stringify({ id: del.dataset.delPrompt }),
+        });
+        if (res.ok) {
+          appState = await res.json();
+          renderWorkbench();
+          showToast('已删除快捷指令');
+        }
+        return;
+      }
+      const send = e.target.closest('[data-send-prompt]');
+      if (send) {
+        const found = (appState.settings.quickPrompts || []).find((p) => p.id === send.dataset.sendPrompt);
+        if (!found) return;
+        const targetConvId = selectedConversationId || window.sidecar?.conversationId;
+        if (!targetConvId || !window.sidecar?.agent?.sendMessage) {
+          return showToast('当前未关联可发送的会话');
+        }
+        try {
+          await window.sidecar.agent.sendMessage(found.body, targetConvId);
+          showToast(`已发送「${found.title}」`);
+        } catch (err) {
+          showToast(`发送失败：${err.message}`);
+        }
+      }
+    });
+
+    $('#btn-save-prompt').addEventListener('click', async () => {
+      const title = $('#input-prompt-title').value.trim();
+      const body = $('#input-prompt-body').value.trim();
+      if (!title || !body) return showToast('请填写指令标题和内容');
+      const res = await apiFetch('/api/prompts/save', {
+        method: 'POST',
+        body: JSON.stringify({ title, body }),
+      });
+      if (res.ok) {
+        appState = await res.json();
+        $('#input-prompt-title').value = '';
+        $('#input-prompt-body').value = '';
+        renderWorkbench();
+        showToast(`已添加「${title}」`);
       }
     });
   }
 
-  // ==================== BOOTSTRAP ====================
   async function init() {
     bindEvents();
-    renderGlossary('');
     await loadState();
     await loadTelemetry();
     setInterval(loadTelemetry, 3500);

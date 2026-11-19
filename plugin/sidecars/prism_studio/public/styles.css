@@ -1151,13 +1151,19 @@ input[type="range"] {
   color: var(--prism-muted);
 }
 
+.checkbox-stack {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+}
+
 .checkbox-item {
   display: flex;
   align-items: center;
   gap: 8px;
   font-size: 12px;
   color: var(--prism-text);
-  align-self: center;
   cursor: pointer;
 }
 
@@ -1173,58 +1179,91 @@ input[type="range"] {
   color: #f87171;
 }
 
-/* ==================== GUIDE / LOCALIZATION ==================== */
-.code-box {
-  margin: 0;
-  padding: 10px 12px;
-  border-radius: 10px;
-  border: 1px solid var(--prism-border-soft);
-  background: color-mix(in srgb, var(--prism-canvas) 62%, transparent);
-  color: var(--prism-text);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+.top-comp-btn {
+  padding: 4px 9px;
   font-size: 11.5px;
-  line-height: 1.55;
-  white-space: pre-wrap;
 }
 
-.glossary-list {
+/* ==================== WORKBENCH ==================== */
+.compact-select {
+  width: auto;
+  min-width: 116px;
+}
+
+.glass-textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--prism-border);
+  background: color-mix(in srgb, var(--prism-canvas) 62%, transparent);
+  color: var(--prism-text);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+  outline: none;
+}
+
+.glass-textarea:focus {
+  border-color: var(--prism-accent);
+}
+
+.action-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+.prompts-list {
   display: flex;
   flex-direction: column;
   gap: 7px;
-  margin-top: 10px;
+  margin-bottom: 12px;
 }
 
-.glossary-item {
-  padding: 9px 10px;
+.prompt-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
   border-radius: 10px;
   border: 1px solid var(--prism-border-soft);
   background: color-mix(in srgb, var(--prism-canvas) 42%, transparent);
 }
 
-.glossary-top {
+.prompt-info {
+  min-width: 0;
+  flex: 1;
+}
+
+.prompt-title {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.prompt-body {
+  font-size: 11px;
+  color: var(--prism-muted);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.prompt-actions {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 3px;
+  gap: 5px;
+  flex-shrink: 0;
 }
 
-.glossary-en {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--prism-accent);
-}
-
-.glossary-zh {
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.glossary-desc {
-  font-size: 11.5px;
-  color: var(--prism-muted);
-  line-height: 1.45;
+.prompt-creator {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding-top: 10px;
+  border-top: 1px solid var(--prism-border-soft);
 }
 
 /* ==================== TOAST ==================== */

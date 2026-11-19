@@ -178,6 +178,26 @@ app.api('/api/pin', (data) => {
   return buildStatePayload(updated);
 });
 
+// Quick Prompts CRUD
+app.api('/api/prompts/save', (data) => {
+  const title = String(data?.title || '').trim().slice(0, 32);
+  const body = String(data?.body || '').trim().slice(0, 2000);
+  if (!title || !body) throw new Error('请填写快捷指令标题和内容');
+  const current = storage.loadSettings();
+  const prompt = { id: `prompt-${Date.now()}`, title, body };
+  const quickPrompts = [prompt, ...(current.quickPrompts || [])].slice(0, 20);
+  const updated = storage.saveSettings({ quickPrompts });
+  return buildStatePayload(updated);
+});
+
+app.api('/api/prompts/delete', (data) => {
+  const id = String(data?.id || '');
+  const current = storage.loadSettings();
+  const quickPrompts = (current.quickPrompts || []).filter((p) => p.id !== id);
+  const updated = storage.saveSettings({ quickPrompts });
+  return buildStatePayload(updated);
+});
+
 // macOS Companion control
 app.api('/api/companion', async (data) => {
   const action = String(data?.action || '');
