@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_VERSION = '3.8.0';
+  const FRONTEND_VERSION = '3.8.1';
   const COLOR_CHANNELS = [
     { key: 'accent', label: '主强调色' },
     { key: 'secondary', label: '次折射色' },
@@ -1102,7 +1102,9 @@
         ? formatCountdown(bucket.resetInMs)
         : '—';
       const burnLine =
-        hasVal && bucket.burnPctPerHour >= 0.1
+        hasVal && leftPct <= 0.05
+          ? '已耗尽'
+          : hasVal && bucket.burnPctPerHour >= 0.1
           ? bucket.etaMs > 0
             ? `-${bucket.burnPctPerHour.toFixed(1)}%/h · 预计 ${formatDurationShort(bucket.etaMs)} 耗尽`
             : `-${bucket.burnPctPerHour.toFixed(1)}%/h`
@@ -1140,7 +1142,12 @@
           .filter(Boolean)
           .join('');
         if (!itemsHtml) return '';
-        const metaTxt = group?.fetchedAtMs ? formatRelativeTime(group.fetchedAtMs) : '';
+        const creditTxt =
+          group?.credits?.hasCredits && typeof group.credits.balance === 'number'
+            ? `积分 ${group.credits.balance.toFixed(1)}`
+            : '';
+        const timeTxt = group?.fetchedAtMs ? formatRelativeTime(group.fetchedAtMs) : '';
+        const metaTxt = [creditTxt, timeTxt].filter(Boolean).join(' · ');
         return `
           <div class="quota-box quota-box-wide">
             <div class="quota-head">

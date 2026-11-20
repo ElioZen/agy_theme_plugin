@@ -27,6 +27,19 @@ function findAgyBinary() {
   return 'agy';
 }
 
+function findCodexBinary() {
+  const candidates = [
+    '/opt/homebrew/bin/codex',
+    '/usr/local/bin/codex',
+    join(homedir(), '.local', 'bin', 'codex'),
+    join(homedir(), '.npm-global', 'bin', 'codex'),
+  ];
+  for (const p of candidates) {
+    if (existsSync(p)) return p;
+  }
+  return 'codex';
+}
+
 const PYTHON_PTY_RUNNER = `
 import os, pty, select, subprocess, sys, time
 
@@ -286,18 +299,45 @@ function readCodexTailRateLimits(fileInfo) {
   return samples;
 }
 
-function readCodexOfficialQuota(nowMs) {
-  const files = listRecentCodexSessionFiles(10, 7 * 24 * 60 * 60 * 1000);
-  if (!files.length) return null;
+function parseCodexRateLimitsObject(rl, ts) {
+  if (!rl || typeof rl !== 'object') return [];
+  const windows = [];
+  for (const w of [rl.primary, rl.secondary]) {
+    if (!w || typeof w !== 'object') continue;
+    const usedRaw = typeof w.usedPercent === 'number' ? w.usedPercent : w.used_percent;
+    if (typeof usedRaw !== 'number') continue;
+    const winMin = Number(w.windowDurationMins ?? w.window_minutes ?? 0);
+    const kind = winMin > 0 && winMin <= 600 ? 'h5' : 'weekly';
+    const resetSec = Number(w.resetsAt ?? w.resets_at ?? 0);
+    const resetAtMs = resetSec > 1e12 ? resetSec : resetSec * 1000;
+    const usedPct = Math.max(0, Math.min(100, Math.round(Number(usedRaw) * 10) / 10));
+    const remainingPct = Math.max(0, Math.round((100 - usedPct) * 10) / 10);
+    windows.push({
+      key: `codex-${kind}`,
+      kind,
+      windowMinutes: winMin,
+      remainingPct,
+      usedPct,
+      resetAtMs,
+      ts,
+    });
+  }
+  return windows;
+}
 
-  let latestByKind = { weekly: null, h5: null };
-  const historyByKey = { 'codex-weekly': [], 'codex-h5': [] };
-  let freshestTs = 0;
+function readCodexOfficialQuota(nowMs, liveCache = null, savedHistory = {}) {
+  const files = listRecentCodexSessionFiles(10, 7 * 24 * 60 * 60 * 1000);
+  const passiveByKind = { weekly: null, h5: null };
+  const historyByKey = {
+    'codex-weekly': Array.isArray(savedHistory?.['codex-weekly']) ? [...savedHistory['codex-weekly']] : [],
+    'codex-h5': Array.isArray(savedHistory?.['codex-h5']) ? [...savedHistory['codex-h5']] : [],
+  };
+  let passiveFreshestTs = 0;
 
   for (const f of files) {
     const samples = readCodexTailRateLimits(f);
     for (const s of samples) {
-      if (s.ts > freshestTs) freshestTs = s.ts;
+      if (s.ts > passiveFreshestTs) passiveFreshestTs = s.ts;
       for (const w of s.windows) {
         const key = w.key;
         historyByKey[key].push({
@@ -305,15 +345,29 @@ function readCodexOfficialQuota(nowMs) {
           remainingPct: w.remainingPct,
           resetAtMs: w.resetAtMs,
         });
-        const cur = latestByKind[w.kind];
+        const cur = passiveByKind[w.kind];
         if (!cur || s.ts > cur.ts) {
-          latestByKind[w.kind] = { ...w, ts: s.ts };
+          passiveByKind[w.kind] = { ...w, ts: s.ts };
         }
       }
     }
   }
 
-  if (!latestByKind.weekly && !latestByKind.h5) return null;
+  const liveFetchedAtMs = Number(liveCache?.fetchedAtMs || 0);
+  const liveByKind = { weekly: null, h5: null };
+  if (liveCache?.windows && Array.isArray(liveCache.windows)) {
+    for (const w of liveCache.windows) {
+      if (!w || !w.kind) continue;
+      liveByKind[w.kind] = { ...w, ts: liveFetchedAtMs };
+    }
+  }
+  const hasLive = Boolean(liveFetchedAtMs > 0 && (liveByKind.weekly || liveByKind.h5));
+  const useLive = hasLive && liveFetchedAtMs >= passiveFreshestTs;
+
+  const chosenByKind = useLive ? liveByKind : passiveByKind;
+  const freshestTs = useLive ? liveFetchedAtMs : passiveFreshestTs;
+
+  if (!chosenByKind.weekly && !chosenByKind.h5) return null;
 
   const formatCodexBucket = (raw) => {
     if (!raw) return null;
@@ -341,8 +395,11 @@ function readCodexOfficialQuota(nowMs) {
     available: true,
     label: 'Codex 系列',
     fetchedAtMs: freshestTs,
-    weekly: formatCodexBucket(latestByKind.weekly),
-    h5: formatCodexBucket(latestByKind.h5),
+    source: useLive ? 'app-server' : 'session-log',
+    planType: liveCache?.planType || null,
+    credits: liveCache?.credits || null,
+    weekly: formatCodexBucket(chosenByKind.weekly),
+    h5: formatCodexBucket(chosenByKind.h5),
   };
 }
 
@@ -426,6 +483,7 @@ function attachBurnMetrics(bucket, rawHistory, nowMs) {
 export class AgyQuotaFetcher {
   #storage;
   #cachePath;
+  #codexCachePath;
   #historyPath;
   #modelCtxPath;
   #captureScriptPath;
@@ -434,6 +492,7 @@ export class AgyQuotaFetcher {
   #timer = null;
   #lastError = '';
   #cached = null;
+  #codexCached = null;
   #history = {};
   #modelCtxCache = {};
   #modelProbeQueue = [];
@@ -443,11 +502,13 @@ export class AgyQuotaFetcher {
   constructor(storage) {
     this.#storage = storage;
     this.#cachePath = join(storage.dataDir, 'quota_cache.json');
+    this.#codexCachePath = join(storage.dataDir, 'codex_quota_cache.json');
     this.#historyPath = join(storage.dataDir, 'quota_history.json');
     this.#modelCtxPath = join(storage.dataDir, 'model_context_cache.json');
     this.#captureScriptPath = join(storage.dataDir, 'quota_capture.sh');
     this.#livePayloadPath = join(storage.dataDir, 'quota_live.json');
     this.#loadCache();
+    this.#loadCodexCache();
     this.#loadHistory();
     this.#loadModelCtxCache();
     this.#seedModelCtxFromLiveFile();
@@ -460,6 +521,53 @@ export class AgyQuotaFetcher {
       }
     } catch {
       this.#cached = null;
+    }
+  }
+
+  #loadCodexCache() {
+    try {
+      if (existsSync(this.#codexCachePath)) {
+        this.#codexCached = JSON.parse(readFileSync(this.#codexCachePath, 'utf-8'));
+      }
+    } catch {
+      this.#codexCached = null;
+    }
+  }
+
+  #saveCodexCache(snapshot) {
+    this.#codexCached = snapshot;
+    try {
+      const tmp = `${this.#codexCachePath}.tmp.${process.pid}.${Date.now()}`;
+      writeFileSync(tmp, JSON.stringify(snapshot, null, 2), 'utf-8');
+      renameSync(tmp, this.#codexCachePath);
+    } catch {
+      // ignore
+    }
+  }
+
+  #recordCodexHistory(windows, ts) {
+    if (!Array.isArray(windows) || !windows.length) return;
+    const maxAgeMs = 6 * 60 * 60 * 1000;
+    let changed = false;
+    for (const w of windows) {
+      if (!w?.key || typeof w.remainingPct !== 'number') continue;
+      const list = Array.isArray(this.#history[w.key]) ? this.#history[w.key] : [];
+      const pruned = list.filter((pt) => pt && ts - pt.ts <= maxAgeMs);
+      const last = pruned[pruned.length - 1];
+      if (!last || ts - last.ts >= 45_000 || Math.abs(last.remainingPct - w.remainingPct) >= 0.1) {
+        pruned.push({ ts, remainingPct: w.remainingPct, resetAtMs: w.resetAtMs || 0 });
+        changed = true;
+      }
+      this.#history[w.key] = pruned.slice(-120);
+    }
+    if (changed) {
+      try {
+        const tmp = `${this.#historyPath}.tmp.${process.pid}.${Date.now()}`;
+        writeFileSync(tmp, JSON.stringify(this.#history), 'utf-8');
+        renameSync(tmp, this.#historyPath);
+      } catch {
+        // ignore
+      }
     }
   }
 
@@ -732,10 +840,126 @@ export class AgyQuotaFetcher {
 
   async refresh() {
     if (this.#inFlight) return this.#inFlight;
-    this.#inFlight = this.#runCapture().finally(() => {
-      this.#inFlight = null;
-    });
+    this.#inFlight = Promise.all([this.#runCapture(), this.#runCodexCapture()])
+      .then(() => this.getSnapshot())
+      .finally(() => {
+        this.#inFlight = null;
+      });
     return this.#inFlight;
+  }
+
+  #runCodexCapture() {
+    return new Promise((resolve) => {
+      let settled = false;
+      let child = null;
+      let hardKill = null;
+      let termKill = null;
+
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (hardKill) clearTimeout(hardKill);
+        if (termKill) clearTimeout(termKill);
+        if (child && !child.killed) {
+          try {
+            child.kill('SIGTERM');
+          } catch {
+            // ignore
+          }
+          termKill = setTimeout(() => {
+            try {
+              child.kill('SIGKILL');
+            } catch {
+              // ignore
+            }
+          }, 1200);
+          termKill.unref?.();
+        }
+        resolve();
+      };
+
+      try {
+        const codexBin = findCodexBinary();
+        child = spawn(codexBin, ['app-server', '--stdio'], {
+          stdio: ['pipe', 'pipe', 'ignore'],
+          env: {
+            ...process.env,
+            PATH: `/opt/homebrew/bin:/usr/local/bin:${join(homedir(), '.local', 'bin')}:${process.env.PATH || ''}`,
+          },
+        });
+
+        hardKill = setTimeout(finish, 9000);
+        let stdoutBuf = '';
+        let sentRateLimitReq = false;
+
+        const sendRpc = (obj) => {
+          try {
+            child.stdin?.write(`${JSON.stringify(obj)}\n`);
+          } catch {
+            // ignore
+          }
+        };
+
+        child.stdout?.on('data', (chunk) => {
+          stdoutBuf += chunk.toString('utf-8');
+          let nl;
+          while ((nl = stdoutBuf.indexOf('\n')) >= 0) {
+            const line = stdoutBuf.slice(0, nl).trim();
+            stdoutBuf = stdoutBuf.slice(nl + 1);
+            if (!line) continue;
+            let msg;
+            try {
+              msg = JSON.parse(line);
+            } catch {
+              continue;
+            }
+            if (msg.id === 1 && !sentRateLimitReq) {
+              sentRateLimitReq = true;
+              sendRpc({ jsonrpc: '2.0', method: 'initialized', params: {} });
+              sendRpc({ jsonrpc: '2.0', id: 2, method: 'account/rateLimits/read', params: {} });
+            } else if (msg.id === 2) {
+              const res = msg.result || {};
+              const rl = res.rateLimits || res.rateLimitsByLimitId?.codex || null;
+              const nowMs = Date.now();
+              const windows = parseCodexRateLimitsObject(rl, nowMs);
+              if (windows.length > 0) {
+                const balRaw = rl?.credits?.balance;
+                const balNum = balRaw !== undefined && balRaw !== null ? Number(balRaw) : null;
+                const snap = {
+                  fetchedAtMs: nowMs,
+                  planType: rl?.planType || null,
+                  ordinaryUsageAllowed: res.ordinaryUsageAllowed !== false,
+                  credits: rl?.credits
+                    ? {
+                        hasCredits: Boolean(rl.credits.hasCredits),
+                        unlimited: Boolean(rl.credits.unlimited),
+                        balance: Number.isFinite(balNum) ? Math.round(balNum * 10) / 10 : null,
+                      }
+                    : null,
+                  windows,
+                };
+                this.#saveCodexCache(snap);
+                this.#recordCodexHistory(windows, nowMs);
+              }
+              finish();
+              return;
+            }
+          }
+        });
+
+        child.on('error', finish);
+        child.on('exit', finish);
+
+        sendRpc({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: { clientInfo: { name: 'prism-orbit', version: '3.8.1' } },
+        });
+      } catch {
+        finish();
+      }
+    });
   }
 
   #runCapture() {
@@ -788,7 +1012,6 @@ export class AgyQuotaFetcher {
                 this.#saveCache(snap);
                 this.#recordHistory(raw.quota, nowMs);
                 this.#lastError = '';
-                this.#inFlight = null;
                 resolve(this.getSnapshot());
                 return;
               }
@@ -797,12 +1020,10 @@ export class AgyQuotaFetcher {
           } catch (err) {
             this.#lastError = err.message;
           }
-          this.#inFlight = null;
           resolve(this.getSnapshot());
         });
       } catch (err) {
         this.#lastError = err.message;
-        this.#inFlight = null;
         resolve(this.getSnapshot());
       }
     });
@@ -851,7 +1072,7 @@ export class AgyQuotaFetcher {
       );
     };
 
-    const codexQuota = readCodexOfficialQuota(nowMs);
+    const codexQuota = readCodexOfficialQuota(nowMs, this.#codexCached, this.#history);
 
     const knownKeys = new Set(['gemini-weekly', 'gemini-5h', '3p-weekly', '3p-5h']);
     const extras = [];
