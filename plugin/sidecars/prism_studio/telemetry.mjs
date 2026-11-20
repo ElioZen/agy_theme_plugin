@@ -448,6 +448,8 @@ function parseAgyTranscript(filePath) {
   let lastObj = null;
   let lastToolDetail = '';
   let firstUserPrompt = '';
+  let currentTurnOutput = 0;
+  let currentTurnSteps = 0;
 
   for (const line of text.split('\n')) {
     if (!line.trim()) continue;
@@ -486,12 +488,18 @@ function parseAgyTranscript(filePath) {
       if (!firstUserPrompt && uText.trim()) {
         firstUserPrompt = uText.slice(0, 1200);
       }
+      currentTurnOutput = 0;
+      currentTurnSteps = 0;
     } else if (obj.type === 'PLANNER_RESPONSE') {
       const model = String(obj.model || '');
       if (model) lastModel = model;
       const inTok = Number(obj.input_tokens || 0);
       const cacheTok = Number(obj.cache_read_tokens || 0);
       const outTok = Number(obj.output_tokens || 0);
+      if (outTok > 0) {
+        currentTurnOutput += outTok;
+        currentTurnSteps += 1;
+      }
       thinkingChars += String(obj.thinking || '').length;
       assistantChars += String(obj.content || '').length;
       if (Array.isArray(obj.tool_calls) && obj.tool_calls.length > 0) {
@@ -616,6 +624,8 @@ function parseAgyTranscript(filePath) {
     lastToolDetail,
     firstUserPrompt,
     isTurnFinished,
+    currentTurnOutput,
+    currentTurnSteps,
     lastStatus: String(lastObj?.status || ''),
     charWeights: {
       user: userChars,
@@ -743,6 +753,9 @@ function parseCodexSession(filePath, statInfo) {
   let prevContextTokens = 0;
   let contextWindowLimit = 0;
   let lastContextTokens = 0;
+  let currentTurnOutput = 0;
+  let currentTurnSteps = 0;
+  let lastReasoningOutput = 0;
   const turns = [];
   const checkpoints = [];
 
@@ -791,6 +804,8 @@ function parseCodexSession(filePath, statInfo) {
       if (p.effort || p.reasoning_effort) effort = String(p.effort || p.reasoning_effort);
       if (p.cwd && !cwd) cwd = String(p.cwd);
       turnCount += 1;
+      currentTurnOutput = 0;
+      currentTurnSteps = 0;
     } else if (obj.type === 'event_msg') {
       if (p.type === 'thread_settings_applied') {
         if (p.thread_settings?.model) model = String(p.thread_settings.model);
@@ -836,8 +851,15 @@ function parseCodexSession(filePath, statInfo) {
         }
         const lu = p.info.last_token_usage || null;
         const curCtx = lu ? Number(lu.total_tokens || Number(lu.input_tokens || 0) + Number(lu.output_tokens || 0)) : 0;
+        if (lu && typeof lu.reasoning_output_tokens === 'number') {
+          lastReasoningOutput = Number(lu.reasoning_output_tokens || 0);
+        }
 
         if (dIn > 0 || dCached > 0 || dOut > 0) {
+          if (dOut > 0) {
+            currentTurnOutput += dOut;
+            currentTurnSteps += 1;
+          }
           const clampedCached = Math.min(dIn, dCached);
           // Detect automatic compaction drop in Codex context size
           if (prevContextTokens >= 150000 && curCtx > 0 && curCtx < prevContextTokens * 0.55) {
@@ -985,6 +1007,9 @@ function parseCodexSession(filePath, statInfo) {
     cacheRead: cachedTokens,
     output: outputTokens,
     reasoningTokens,
+    currentTurnOutput,
+    currentTurnSteps,
+    lastReasoningOutput,
     turnCount,
     turns,
     checkpoints,
@@ -1543,6 +1568,14 @@ function buildContextSnapshotFromSource(
       : 0;
   const explicitEffort = isCodex ? source?.lastEffort || source?.effort || '' : '';
   const parsedLastModel = parseModelAndEffort(rawModel, explicitEffort);
+  const lastStepOutput = Number(latestModelTurn?.output || 0);
+  const lastTurnOutput = Math.max(lastStepOutput, Number(source?.currentTurnOutput || 0));
+  const lastOutput = {
+    stepTokens: lastStepOutput,
+    turnTokens: lastTurnOutput,
+    turnSteps: Number(source?.currentTurnSteps || (lastStepOutput > 0 ? 1 : 0)),
+    reasoningTokens: isCodex ? Number(source?.lastReasoningOutput || 0) : 0,
+  };
 
   return {
     used: usedTokens,
@@ -1554,6 +1587,7 @@ function buildContextSnapshotFromSource(
     limitSourceLabel,
     percent: usedPercent,
     remaining: remainingTokens,
+    lastOutput,
     target: targetMeta || {
       key: 'main',
       isMain: true,
@@ -2006,6 +2040,7 @@ export function buildTelemetrySnapshot({
   // C. Active Native GUI Subagents (ONLY running, stalled > 20m, or touched recently)
   const nativeSubIds = new Set([...parentOfChild.keys(), ...subDescriptors.keys()]);
   for (const cid of nativeSubIds) {
+    if (parsedAgyCli.has(cid)) continue; // Avoid duplicating AGY CLI sessions as empty GUI subagents
     const s = summaryById.get(cid);
     const desc = subDescriptors.get(cid);
     const parsed = parsedDesktop.get(cid);
@@ -2278,6 +2313,7 @@ export function buildTelemetrySnapshot({
   }
 
   for (const cid of nativeSubIds) {
+    if (parsedAgyCli.has(cid)) continue;
     const key = `gui-subagent:${cid}`;
     if (seenTargetKeys.has(key)) continue;
     const parsed = parsedDesktop.get(cid);

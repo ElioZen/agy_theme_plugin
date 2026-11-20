@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_VERSION = '3.7.1';
+  const FRONTEND_VERSION = '3.7.2';
   const COLOR_CHANNELS = [
     { key: 'accent', label: '主强调色' },
     { key: 'secondary', label: '次折射色' },
@@ -1304,6 +1304,30 @@
     $('#ctx-effort-badge').textContent = spd.effort || '—';
     $('#metric-speed').textContent = spd.latest ? spd.latest.toFixed(1) : '—';
     renderSparkline(spd.sparkline);
+
+    const lo = ctx.lastOutput || { stepTokens: 0, turnTokens: 0, turnSteps: 0, reasoningTokens: 0 };
+    const outItem = $('#ctx-output-item');
+    const stepOutEl = $('#metric-last-output');
+    const turnOutEl = $('#metric-turn-output');
+    if (stepOutEl) {
+      stepOutEl.textContent = lo.stepTokens > 0 ? formatCompact(lo.stepTokens) : '—';
+    }
+    if (turnOutEl) {
+      turnOutEl.textContent =
+        lo.turnSteps > 1 && lo.turnTokens > lo.stepTokens ? `·轮${formatCompact(lo.turnTokens)}` : '';
+    }
+    if (outItem) {
+      if (lo.stepTokens > 0) {
+        const parts = [`最新单步输出：${formatNumber(lo.stepTokens)} tokens`];
+        if (lo.reasoningTokens > 0) parts.push(`含思考 ${formatNumber(lo.reasoningTokens)}`);
+        if (lo.turnSteps > 1 && lo.turnTokens > lo.stepTokens) {
+          parts.push(`本轮累计（${lo.turnSteps} 步）：${formatNumber(lo.turnTokens)} tokens`);
+        }
+        outItem.title = parts.join('；');
+      } else {
+        outItem.title = '最新一次模型回复的输出 Token 数（含思考链输出）';
+      }
+    }
 
     const cp = ctx.compaction || { count: 0, lastAtMs: 0, lastDurationMs: null, inProgress: false };
     const cpCountEl = $('#ctx-cp-count');
