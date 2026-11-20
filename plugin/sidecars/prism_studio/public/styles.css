@@ -679,6 +679,7 @@ body.theme-light .seg-group { background: rgba(15, 23, 42, 0.06); }
 .dot.accent { background: var(--prism-accent); }
 .dot.secondary { background: var(--prism-secondary); }
 .dot.tertiary { background: var(--prism-tertiary); }
+.dot.violet { background: #C084FC; }
 
 .stats-viz-toolbar {
   display: flex;
@@ -884,6 +885,7 @@ body.theme-light .seg-group { background: rgba(15, 23, 42, 0.06); }
 .overview-comp-pcts .c-cache { color: var(--prism-tertiary); }
 .overview-comp-pcts .c-in { color: var(--prism-accent); }
 .overview-comp-pcts .c-out { color: var(--prism-secondary); }
+.overview-comp-pcts .c-reason { color: #C084FC; }
 
 .ratio-bar {
   display: flex;

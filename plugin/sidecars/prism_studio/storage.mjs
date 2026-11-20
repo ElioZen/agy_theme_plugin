@@ -125,7 +125,7 @@ export const BUILTIN_WALLPAPERS = [
 ];
 
 const SCHEMA_VERSION = 3;
-export const ASSET_VERSION = '3.7.2';
+export const ASSET_VERSION = '3.8.0';
 
 export const DEFAULT_SETTINGS = {
   schemaVersion: SCHEMA_VERSION,

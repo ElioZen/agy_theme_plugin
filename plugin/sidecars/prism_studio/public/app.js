@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_VERSION = '3.7.2';
+  const FRONTEND_VERSION = '3.8.0';
   const COLOR_CHANNELS = [
     { key: 'accent', label: '主强调色' },
     { key: 'secondary', label: '次折射色' },
@@ -750,6 +750,19 @@
     $('#sum-cache').textContent = formatCompact(dataBlock.cacheRead);
     $('#sum-uncached').textContent = formatCompact(dataBlock.uncachedInput);
     $('#sum-output').textContent = formatCompact(dataBlock.output);
+    const sumReasonTok = Number(dataBlock.reasoningTokens || 0);
+    const sumReasonOutPct = Number(dataBlock.reasoningShareOfOutput || 0);
+    const sumReasonTotPct = Number(dataBlock.reasoningShareOfTotal || 0);
+    const sumReasonPerTurn = Number(dataBlock.reasoningPerTurn || 0);
+    const sumReasonEl = $('#sum-reasoning');
+    const sumReasonWrap = $('#sum-reasoning-wrap');
+    if (sumReasonEl) {
+      sumReasonEl.textContent =
+        dataBlock.output > 0 ? `${formatCompact(sumReasonTok)} (${sumReasonOutPct.toFixed(1)}%)` : '0';
+    }
+    if (sumReasonWrap) {
+      sumReasonWrap.title = `推理 Token：${formatNumber(sumReasonTok)} · 占总输出 ${sumReasonOutPct.toFixed(1)}% · 占总用量 ${sumReasonTotPct.toFixed(2)}% · 平均 ${formatNumber(sumReasonPerTurn)}/次（Codex 取原生字段，AGY 按完整日志校准估算）`;
+    }
 
     const models = dataBlock.models || [];
     if (drilledModel && !models.some((m) => m.displayName === drilledModel)) {
@@ -768,6 +781,7 @@
           cacheRead: 0,
           uncachedInput: 0,
           output: 0,
+          reasoningTokens: 0,
           turns: 0,
           costUsd: 0,
           sources: new Set(),
@@ -778,6 +792,7 @@
       g.cacheRead += Number(m.cacheRead || 0);
       g.uncachedInput += Number(m.uncachedInput || 0);
       g.output += Number(m.output || 0);
+      g.reasoningTokens += Number(m.reasoningTokens || 0);
       g.turns += Number(m.turns || 0);
       g.costUsd += Number(m.costUsd || 0);
       if (m.sourceLabel) g.sources.add(m.sourceLabel);
@@ -792,6 +807,9 @@
         const uncachedPct = (g.uncachedInput / tot) * 100;
         const outputPct = Math.max(0, 100 - cachePct - uncachedPct);
         const promptTot = g.cacheRead + g.uncachedInput;
+        const reasoningOutputPct = g.output > 0 ? (g.reasoningTokens / g.output) * 100 : 0;
+        const reasoningTotalPct = (g.reasoningTokens / tot) * 100;
+        const reasoningPerTurn = g.turns > 0 ? Math.round(g.reasoningTokens / g.turns) : 0;
         return {
           ...g,
           sourceList: [...g.sources],
@@ -800,6 +818,9 @@
           cachePct,
           uncachedPct,
           outputPct,
+          reasoningOutputPct,
+          reasoningTotalPct,
+          reasoningPerTurn,
           promptCacheHitRate: promptTot > 0 ? (g.cacheRead / promptTot) * 100 : 0,
         };
       })
@@ -865,7 +886,7 @@
                   ? `<div class="overview-bar-track"><div class="overview-bar-fill" style="width:${Math.max(2, relWidth)}%;background:${g.color}"></div></div>`
                   : ''
               }
-              <div class="overview-comp-bar" title="缓存 ${g.cachePct.toFixed(1)}% · 未命中 ${g.uncachedPct.toFixed(1)}% · 输出 ${g.outputPct.toFixed(1)}%">
+              <div class="overview-comp-bar" title="缓存 ${g.cachePct.toFixed(1)}% · 未命中 ${g.uncachedPct.toFixed(1)}% · 输出 ${g.outputPct.toFixed(1)}% · 推理 ${formatCompact(g.reasoningTokens)}（占输出 ${g.reasoningOutputPct.toFixed(1)}% · 占总量 ${g.reasoningTotalPct.toFixed(2)}% · 均 ${g.reasoningPerTurn}/次）">
                 <span style="width:${g.cachePct}%;background:var(--prism-tertiary)"></span>
                 <span style="width:${g.uncachedPct}%;background:var(--prism-accent)"></span>
                 <span style="width:${g.outputPct}%;background:var(--prism-secondary)"></span>
@@ -875,6 +896,7 @@
                   <span class="c-cache">缓 ${g.cachePct.toFixed(1)}%</span>
                   <span class="c-in">新 ${g.uncachedPct.toFixed(1)}%</span>
                   <span class="c-out">出 ${g.outputPct.toFixed(1)}%</span>
+                  <span class="c-reason" title="推理占该模型总输出的 ${g.reasoningOutputPct.toFixed(1)}%（占总用量 ${g.reasoningTotalPct.toFixed(2)}%，平均 ${g.reasoningPerTurn} tok/次）">推 ${g.reasoningOutputPct.toFixed(1)}%</span>
                 </span>
                 <span>${subVal}</span>
               </div>
@@ -989,7 +1011,7 @@
                 </div>
                 <div class="model-row-sub tabular">
                   <span>缓存命中 ${m.cacheHitRate.toFixed(1)}% · ${m.turns} 轮</span>
-                  <span>输出 ${formatCompact(m.output)} · ≈$${m.costUsd.toFixed(2)}</span>
+                  <span title="推理 ${formatNumber(m.reasoningTokens || 0)} tokens · 占输出 ${(m.reasoningShareOfOutput || 0).toFixed(1)}% · 占总量 ${(m.reasoningShareOfTotal || 0).toFixed(2)}% · 均 ${formatNumber(m.reasoningPerTurn || 0)}/次">输出 ${formatCompact(m.output)} · 推 ${(m.reasoningShareOfOutput || 0).toFixed(1)}% · ≈$${m.costUsd.toFixed(2)}</span>
                 </div>
               </div>
             `;

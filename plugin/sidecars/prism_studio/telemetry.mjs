@@ -416,6 +416,41 @@ function buildChineseTaskTitle({ dbTitle = '', role = '', prompt = '' } = {}) {
   };
 }
 
+function estimateWeightedTextTokens(text) {
+  const s = String(text || '');
+  if (!s) return 0;
+  let cjk = 0;
+  for (let i = 0; i < s.length; i += 1) {
+    const code = s.charCodeAt(i);
+    if ((code >= 0x4e00 && code <= 0x9fff) || (code >= 0x3000 && code <= 0x303f) || (code >= 0xff00 && code <= 0xffef)) {
+      cjk += 1;
+    }
+  }
+  return cjk * 0.65 + (s.length - cjk) * 0.34;
+}
+
+function estimateAgyStepReasoningTokens(obj, outTok, tcJson = '') {
+  if (!outTok || outTok <= 0) return 0;
+  const thinking = String(obj.thinking || '');
+  const content = String(obj.content || '');
+  const hasThinking = thinking.trim().length > 0;
+  const tThink = estimateWeightedTextTokens(thinking);
+  const tVis = estimateWeightedTextTokens(content) + estimateWeightedTextTokens(tcJson);
+  const trunc = Array.isArray(obj.truncated_fields) ? new Set(obj.truncated_fields) : null;
+
+  let est = 0;
+  if (trunc && (trunc.has('content') || trunc.has('tool_calls')) && tThink > 0) {
+    const denom = tThink + tVis;
+    est = denom > 0 ? outTok * (tThink / denom) : 0;
+  } else if (hasThinking) {
+    est = Math.max(Math.min(outTok, tThink), Math.max(0, outTok - tVis));
+  } else if (tVis > 0) {
+    // Only count clear residual excess above 1.35x visible tokens when no thinking field is present
+    est = Math.max(0, outTok - tVis * 1.35);
+  }
+  return Math.round(Math.max(0, Math.min(outTok, est)));
+}
+
 function parseAgyTranscript(filePath) {
   let stat;
   try {
@@ -502,8 +537,10 @@ function parseAgyTranscript(filePath) {
       }
       thinkingChars += String(obj.thinking || '').length;
       assistantChars += String(obj.content || '').length;
+      let tcJson = '';
       if (Array.isArray(obj.tool_calls) && obj.tool_calls.length > 0) {
-        toolChars += JSON.stringify(obj.tool_calls).length;
+        tcJson = JSON.stringify(obj.tool_calls);
+        toolChars += tcJson.length;
         const lastTc = obj.tool_calls[obj.tool_calls.length - 1];
         const detail = summarizeToolCallDetail(lastTc?.name || lastTc?.tool_name || '', lastTc?.args || lastTc?.arguments);
         if (detail) lastToolDetail = detail;
@@ -519,6 +556,7 @@ function parseAgyTranscript(filePath) {
       }
 
       if (inTok > 0 || cacheTok > 0 || outTok > 0) {
+        const estReason = estimateAgyStepReasoningTokens(obj, outTok, tcJson);
         turns.push({
           stepIndex: Number(obj.step_index || 0),
           ts,
@@ -526,6 +564,7 @@ function parseAgyTranscript(filePath) {
           uncachedInput: inTok,
           cacheRead: cacheTok,
           output: outTok,
+          reasoning: estReason,
           contextTokens: inTok + cacheTok + outTok,
           tokPerSec,
           isCheckpoint: false,
@@ -823,10 +862,12 @@ function parseCodexSession(filePath, statInfo) {
         let dIn = 0;
         let dCached = 0;
         let dOut = 0;
+        let dReason = 0;
         if (!prevUsage) {
           dIn = curIn;
           dCached = curCached;
           dOut = curOut;
+          dReason = curReason;
         } else if (
           curIn === prevUsage.input_tokens &&
           curCached === prevUsage.cached_input_tokens &&
@@ -837,13 +878,20 @@ function parseCodexSession(filePath, statInfo) {
           dIn = curIn - prevUsage.input_tokens;
           dCached = Math.max(0, curCached - prevUsage.cached_input_tokens);
           dOut = curOut - prevUsage.output_tokens;
+          dReason = Math.max(0, curReason - (prevUsage.reasoning_output_tokens || 0));
         } else if (p.info.last_token_usage) {
           const lu = p.info.last_token_usage;
           dIn = Number(lu.input_tokens || 0);
           dCached = Number(lu.cached_input_tokens || 0);
           dOut = Number(lu.output_tokens || 0);
+          dReason = Number(lu.reasoning_output_tokens || 0);
         }
-        prevUsage = { input_tokens: curIn, cached_input_tokens: curCached, output_tokens: curOut };
+        prevUsage = {
+          input_tokens: curIn,
+          cached_input_tokens: curCached,
+          output_tokens: curOut,
+          reasoning_output_tokens: curReason,
+        };
 
         if (p.info.model_context_window) {
           const win = Number(p.info.model_context_window || 0);
@@ -904,6 +952,7 @@ function parseCodexSession(filePath, statInfo) {
             uncachedInput: Math.max(0, dIn - clampedCached),
             cacheRead: clampedCached,
             output: dOut,
+            reasoning: Math.max(0, Math.min(dOut, dReason)),
             contextTokens: curCtx || dIn + dOut,
             tokPerSec,
             isCheckpoint: false,
@@ -1150,6 +1199,8 @@ function summarizeModelEntries(entries) {
   let totalUncached = 0;
   let totalCacheRead = 0;
   let totalOutput = 0;
+  let totalReasoning = 0;
+  let totalTurns = 0;
   let totalCostUsd = 0;
   const bySource = { gui: 0, agyCli: 0, codexCli: 0 };
 
@@ -1170,6 +1221,7 @@ function summarizeModelEntries(entries) {
         uncachedInput: 0,
         cacheRead: 0,
         output: 0,
+        reasoningTokens: 0,
         totalTokens: 0,
         turns: 0,
         costUsd: 0,
@@ -1177,11 +1229,14 @@ function summarizeModelEntries(entries) {
       map.set(key, entry);
     }
     const rowTok = t.uncachedInput + t.cacheRead + t.output;
+    const rowReason = Math.max(0, Math.min(Number(t.output || 0), Number(t.reasoning || 0)));
+    const rowTurns = t.turns || 1;
     entry.uncachedInput += t.uncachedInput;
     entry.cacheRead += t.cacheRead;
     entry.output += t.output;
+    entry.reasoningTokens += rowReason;
     entry.totalTokens += rowTok;
-    entry.turns += t.turns || 1;
+    entry.turns += rowTurns;
     const cost = estimateCostUsd(mId, t.uncachedInput, t.cacheRead, t.output);
     entry.costUsd += cost;
 
@@ -1192,6 +1247,8 @@ function summarizeModelEntries(entries) {
     totalUncached += t.uncachedInput;
     totalCacheRead += t.cacheRead;
     totalOutput += t.output;
+    totalReasoning += rowReason;
+    totalTurns += rowTurns;
     totalCostUsd += cost;
   }
 
@@ -1205,16 +1262,24 @@ function summarizeModelEntries(entries) {
         color: MODEL_PALETTE[idx % MODEL_PALETTE.length],
         sharePercent: Math.round((m.totalTokens / grandTotal) * 1000) / 10,
         cacheHitRate: promptTotal > 0 ? Math.round((m.cacheRead / promptTotal) * 1000) / 10 : 0,
+        reasoningShareOfOutput: m.output > 0 ? Math.round((m.reasoningTokens / m.output) * 1000) / 10 : 0,
+        reasoningShareOfTotal: m.totalTokens > 0 ? Math.round((m.reasoningTokens / m.totalTokens) * 10000) / 100 : 0,
+        reasoningPerTurn: m.turns > 0 ? Math.round(m.reasoningTokens / m.turns) : 0,
         costUsd: Math.round(m.costUsd * 100) / 100,
       };
     });
 
   const promptAll = totalUncached + totalCacheRead;
+  const totalAll = totalUncached + totalCacheRead + totalOutput;
   return {
-    totalTokens: totalUncached + totalCacheRead + totalOutput,
+    totalTokens: totalAll,
     uncachedInput: totalUncached,
     cacheRead: totalCacheRead,
     output: totalOutput,
+    reasoningTokens: totalReasoning,
+    reasoningShareOfOutput: totalOutput > 0 ? Math.round((totalReasoning / totalOutput) * 1000) / 10 : 0,
+    reasoningShareOfTotal: totalAll > 0 ? Math.round((totalReasoning / totalAll) * 10000) / 100 : 0,
+    reasoningPerTurn: totalTurns > 0 ? Math.round(totalReasoning / totalTurns) : 0,
     cacheHitRate: promptAll > 0 ? Math.round((totalCacheRead / promptAll) * 1000) / 10 : 0,
     costUsd: Math.round(totalCostUsd * 100) / 100,
     bySource,
@@ -1723,13 +1788,18 @@ export function buildTelemetrySnapshot({
     }
   }
 
-  // Parse all desktop + agy-cli transcripts (cached by mtime:size)
+  // Parse all desktop + agy-cli transcripts (prefer untruncated transcript_full.jsonl for exact reasoning split; cached by mtime:size)
+  const resolveTranscriptFile = (baseDir, id) => {
+    const logsDir = join(baseDir, id, '.system_generated', 'logs');
+    const fullPath = join(logsDir, 'transcript_full.jsonl');
+    return existsSync(fullPath) ? fullPath : join(logsDir, 'transcript.jsonl');
+  };
+
   const parsedDesktop = new Map();
   if (existsSync(desktopBrainDir)) {
     for (const id of readdirSync(desktopBrainDir)) {
       if (!/^[0-9a-f-]{8,}$/i.test(id)) continue;
-      const p = join(desktopBrainDir, id, '.system_generated', 'logs', 'transcript.jsonl');
-      const parsed = parseAgyTranscript(p);
+      const parsed = parseAgyTranscript(resolveTranscriptFile(desktopBrainDir, id));
       if (parsed) parsedDesktop.set(id, parsed);
     }
   }
@@ -1738,8 +1808,7 @@ export function buildTelemetrySnapshot({
   if (existsSync(cliBrainDir)) {
     for (const id of readdirSync(cliBrainDir)) {
       if (!/^[0-9a-f-]{8,}$/i.test(id)) continue;
-      const p = join(cliBrainDir, id, '.system_generated', 'logs', 'transcript.jsonl');
-      const parsed = parseAgyTranscript(p);
+      const parsed = parseAgyTranscript(resolveTranscriptFile(cliBrainDir, id));
       if (parsed) parsedAgyCli.set(id, parsed);
     }
   }
