@@ -1290,55 +1290,90 @@ function inferModelSpecContextLimit(rawModel) {
   return 0;
 }
 
+const AGY_RUNTIME_CONTEXT_CAP = 512000;
+
 function resolveDynamicContextLimit({
   source = null,
   rawModel = '',
   isCodex = false,
   usedTokens = 0,
-  fallbackLimit = 1048576,
+  maxObservedTokens = 0,
+  fallbackLimit = AGY_RUNTIME_CONTEXT_CAP,
   resolveModelContextWindow = null,
 } = {}) {
+  const peakObserved = Math.max(Number(usedTokens || 0), Number(maxObservedTokens || 0));
+
   if (isCodex) {
     const sessionLimit = Number(source?.contextWindowLimit || 0);
     if (sessionLimit >= 32000) {
-      return { limit: sessionLimit, isNativeLimit: true, limitSource: 'codex-session', limitSourceLabel: 'Codex 原生' };
+      return {
+        limit: sessionLimit,
+        apiModelLimit: sessionLimit,
+        isRuntimeCapped: false,
+        isNativeLimit: true,
+        limitSource: 'codex-session',
+        limitSourceLabel: 'Codex 原生',
+      };
     }
     const cfgLimit = readCodexConfigLimits().modelContextWindow;
     if (cfgLimit >= 32000) {
-      return { limit: cfgLimit, isNativeLimit: true, limitSource: 'codex-config', limitSourceLabel: 'Codex 配置' };
-    }
-  }
-
-  if (!isCodex && typeof resolveModelContextWindow === 'function' && rawModel) {
-    const official = resolveModelContextWindow(rawModel);
-    if (official && Number(official.limit) >= 32000) {
       return {
-        limit: Number(official.limit),
+        limit: cfgLimit,
+        apiModelLimit: cfgLimit,
+        isRuntimeCapped: false,
         isNativeLimit: true,
-        limitSource: 'agy-official',
-        limitSourceLabel: '官方识别',
+        limitSource: 'codex-config',
+        limitSourceLabel: 'Codex 配置',
       };
     }
   }
 
-  let spec = inferModelSpecContextLimit(rawModel) || Math.max(32000, Number(fallbackLimit) || 1048576);
-  // Safety step-up if observed usage already exceeds estimated spec
-  if (usedTokens > spec) {
-    const steps = [200000, 524288, 1000000, 1048576, 2097152];
-    const nextStep = steps.find((s) => s >= usedTokens);
-    spec = nextStep || Math.ceil(usedTokens * 1.15);
+  let apiModelLimit = 0;
+  let fromOfficialProbe = false;
+  if (!isCodex && typeof resolveModelContextWindow === 'function' && rawModel) {
+    const official = resolveModelContextWindow(rawModel);
+    if (official && Number(official.limit) >= 32000) {
+      apiModelLimit = Number(official.limit);
+      fromOfficialProbe = true;
+    }
+  }
+  if (!apiModelLimit) {
+    apiModelLimit = inferModelSpecContextLimit(rawModel) || Math.max(32000, Number(fallbackLimit) || AGY_RUNTIME_CONTEXT_CAP);
+  }
+
+  // Antigravity Desktop & AGY CLI enforce a hard 512K runtime ceiling before forced compaction,
+  // even when the underlying model's API capability is 1M (1,048,576 / 1,000,000).
+  // Auto-unlock if a future Antigravity update or tier ever lets a session exceed 540K.
+  if (!isCodex && apiModelLimit > AGY_RUNTIME_CONTEXT_CAP && peakObserved <= 540000) {
+    return {
+      limit: AGY_RUNTIME_CONTEXT_CAP,
+      apiModelLimit,
+      isRuntimeCapped: true,
+      isNativeLimit: true,
+      limitSource: 'agy-cap',
+      limitSourceLabel: 'AGY 上限',
+    };
+  }
+
+  let effectiveLimit = apiModelLimit;
+  if (peakObserved > effectiveLimit) {
+    const steps = [200000, 512000, 1000000, 1048576, 2097152];
+    const nextStep = steps.find((s) => s >= peakObserved);
+    effectiveLimit = nextStep || Math.ceil(peakObserved * 1.15);
   }
   return {
-    limit: spec,
-    isNativeLimit: false,
-    limitSource: 'model-spec',
-    limitSourceLabel: '模型规格',
+    limit: effectiveLimit,
+    apiModelLimit: effectiveLimit,
+    isRuntimeCapped: false,
+    isNativeLimit: fromOfficialProbe,
+    limitSource: fromOfficialProbe ? 'agy-official' : 'model-spec',
+    limitSourceLabel: fromOfficialProbe ? '官方识别' : '模型规格',
   };
 }
 
 function buildContextSnapshotFromSource(
   source,
-  { isCodex = false, fallbackLimit = 1048576, nowMs = Date.now(), targetMeta = null, resolveModelContextWindow = null } = {},
+  { isCodex = false, fallbackLimit = AGY_RUNTIME_CONTEXT_CAP, nowMs = Date.now(), targetMeta = null, resolveModelContextWindow = null } = {},
 ) {
   const turns = source?.turns || [];
   const latestTurn = turns.length > 0 ? turns[turns.length - 1] : null;
@@ -1351,11 +1386,16 @@ function buildContextSnapshotFromSource(
     : latestTurn
     ? Number(latestTurn.contextTokens || 0)
     : 0;
-  const { limit, isNativeLimit, limitSource, limitSourceLabel } = resolveDynamicContextLimit({
+  let maxObservedTokens = usedTokens;
+  for (const cp of source?.checkpoints || []) {
+    if (Number(cp?.preTokens || 0) > maxObservedTokens) maxObservedTokens = Number(cp.preTokens);
+  }
+  const { limit, apiModelLimit, isRuntimeCapped, isNativeLimit, limitSource, limitSourceLabel } = resolveDynamicContextLimit({
     source,
     rawModel,
     isCodex,
     usedTokens,
+    maxObservedTokens,
     fallbackLimit,
     resolveModelContextWindow,
   });
@@ -1507,6 +1547,8 @@ function buildContextSnapshotFromSource(
   return {
     used: usedTokens,
     limit,
+    apiModelLimit,
+    isRuntimeCapped,
     isNativeLimit,
     limitSource,
     limitSourceLabel,
@@ -2095,6 +2137,26 @@ export function buildTelemetrySnapshot({
           },
         });
       }
+    } else if (tKind === 'gui-conv') {
+      const parsed = parsedDesktop.get(tId);
+      if (parsed) {
+        const s = summaryById.get(tId);
+        const proj = resolveProjectForConv(tId);
+        contextSnapshot = buildContextSnapshotFromSource(parsed, {
+          isCodex: false,
+          fallbackLimit: windowLimit,
+          nowMs,
+          resolveModelContextWindow,
+          targetMeta: {
+            key: `gui-conv:${tId}`,
+            isMain: false,
+            kind: 'gui-conv',
+            kindLabel: '其他主会话',
+            title: s?.title || `会话 ${tId.slice(0, 8)}`,
+            projectName: proj?.name || '',
+          },
+        });
+      }
     } else if (tKind === 'gui-subagent') {
       const parsed = parsedDesktop.get(tId);
       if (parsed) {
@@ -2141,6 +2203,148 @@ export function buildTelemetrySnapshot({
     });
   }
 
+  // Build rich 24h context switcher targets (all recent GUI main sessions + 24h CLI/subagents across projects)
+  const CTX_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+  const recentAgentTargets = [];
+  const seenTargetKeys = new Set();
+
+  for (const a of liveAgents) {
+    seenTargetKeys.add(a.targetKey);
+    recentAgentTargets.push({
+      targetKey: a.targetKey,
+      kind: a.kind,
+      kindLabel: a.kindLabel,
+      title: a.taskTitle || a.shortId,
+      projectId: a.projectId,
+      projectName: a.projectName,
+      isRunning: a.isRunning,
+      isStalled: a.isStalled,
+      contextUsed: a.contextUsed,
+      contextLimit: a.contextLimit,
+      contextPercent: a.contextPercent,
+      lastActiveMs: a.lastActiveMs,
+    });
+  }
+
+  for (const cs of codexSessions) {
+    const key = `codex-cli:${cs.id}`;
+    if (seenTargetKeys.has(key) || nowMs - cs.lastActiveMs > CTX_LOOKBACK_MS) continue;
+    const ctxSnap = buildContextSnapshotFromSource(cs, { isCodex: true, fallbackLimit: windowLimit, nowMs, resolveModelContextWindow });
+    if (ctxSnap.used <= 0) continue;
+    seenTargetKeys.add(key);
+    const { taskTitle } = buildChineseTaskTitle({ prompt: cs.firstUserPrompt });
+    recentAgentTargets.push({
+      targetKey: key,
+      kind: 'codex-cli',
+      kindLabel: cs.isCliExec ? 'Codex CLI' : 'Codex',
+      title: taskTitle || `Codex ${cs.shortId}`,
+      projectId: cs.projectId,
+      projectName: cs.projectName,
+      isRunning: false,
+      isStalled: false,
+      contextUsed: ctxSnap.used,
+      contextLimit: ctxSnap.limit,
+      contextPercent: ctxSnap.percent,
+      lastActiveMs: cs.lastActiveMs,
+    });
+  }
+
+  for (const [cid, parsed] of parsedAgyCli.entries()) {
+    const key = `agy-cli:${cid}`;
+    if (seenTargetKeys.has(key)) continue;
+    const s = summaryById.get(cid);
+    const proj = resolveProjectForConv(cid);
+    if (!proj) continue;
+    const lastActiveMs = Math.max(s?.lastModifiedMs || 0, parsed.lastStepAt || 0, parsed.mtimeMs || 0);
+    if (nowMs - lastActiveMs > CTX_LOOKBACK_MS) continue;
+    const ctxSnap = buildContextSnapshotFromSource(parsed, { isCodex: false, fallbackLimit: windowLimit, nowMs, resolveModelContextWindow });
+    if (ctxSnap.used <= 0) continue;
+    seenTargetKeys.add(key);
+    const { taskTitle } = buildChineseTaskTitle({ dbTitle: s?.explicitTitle || '', prompt: parsed.firstUserPrompt });
+    recentAgentTargets.push({
+      targetKey: key,
+      kind: 'agy-cli',
+      kindLabel: 'AGY CLI',
+      title: taskTitle || `AGY CLI ${cid.slice(0, 8)}`,
+      projectId: proj.id,
+      projectName: proj.name,
+      isRunning: false,
+      isStalled: false,
+      contextUsed: ctxSnap.used,
+      contextLimit: ctxSnap.limit,
+      contextPercent: ctxSnap.percent,
+      lastActiveMs,
+    });
+  }
+
+  for (const cid of nativeSubIds) {
+    const key = `gui-subagent:${cid}`;
+    if (seenTargetKeys.has(key)) continue;
+    const parsed = parsedDesktop.get(cid);
+    if (!parsed) continue;
+    const s = summaryById.get(cid);
+    const desc = subDescriptors.get(cid);
+    const proj = resolveProjectForConv(cid, desc?.workspaceUris || []);
+    if (!proj) continue;
+    const lastActiveMs = Math.max(s?.lastModifiedMs || 0, parsed.lastStepAt || 0, parsed.mtimeMs || 0);
+    if (nowMs - lastActiveMs > CTX_LOOKBACK_MS) continue;
+    const ctxSnap = buildContextSnapshotFromSource(parsed, { isCodex: false, fallbackLimit: windowLimit, nowMs, resolveModelContextWindow });
+    if (ctxSnap.used <= 0) continue;
+    seenTargetKeys.add(key);
+    const { taskTitle } = buildChineseTaskTitle({
+      dbTitle: s?.explicitTitle || '',
+      role: desc?.role || '',
+      prompt: parsed.firstUserPrompt,
+    });
+    recentAgentTargets.push({
+      targetKey: key,
+      kind: 'gui-subagent',
+      kindLabel: desc?.typeName ? `GUI 子智能体 · ${desc.typeName}` : 'GUI 子智能体',
+      title: taskTitle || `子智能体 ${cid.slice(0, 8)}`,
+      projectId: proj.id,
+      projectName: proj.name,
+      isRunning: false,
+      isStalled: false,
+      contextUsed: ctxSnap.used,
+      contextLimit: ctxSnap.limit,
+      contextPercent: ctxSnap.percent,
+      lastActiveMs,
+    });
+  }
+
+  recentAgentTargets.sort((a, b) => {
+    const rank = (x) => (x.isRunning ? 0 : x.isStalled ? 1 : 2);
+    if (rank(a) !== rank(b)) return rank(a) - rank(b);
+    return b.lastActiveMs - a.lastActiveMs;
+  });
+
+  const otherSessionTargets = [];
+  for (const c of topConversations.slice(0, 20)) {
+    if (c.id === activeConvId) continue;
+    const parsed = parsedDesktop.get(c.id);
+    if (!parsed) continue;
+    const ctxSnap = buildContextSnapshotFromSource(parsed, {
+      isCodex: false,
+      fallbackLimit: windowLimit,
+      nowMs,
+      resolveModelContextWindow,
+    });
+    otherSessionTargets.push({
+      targetKey: `gui-conv:${c.id}`,
+      kind: 'gui-conv',
+      kindLabel: '主会话',
+      title: c.title,
+      projectId: c.projectId,
+      projectName: c.projectName,
+      isRunning: c.isRunning,
+      isStalled: false,
+      contextUsed: ctxSnap.used,
+      contextLimit: ctxSnap.limit,
+      contextPercent: ctxSnap.percent,
+      lastActiveMs: c.lastModifiedMs,
+    });
+  }
+
   // Conversations filtered to the active project (or all if no project selected)
   const visibleConversations = activeProject
     ? topConversations.filter((c) => c.projectId === activeProject.id)
@@ -2163,6 +2367,10 @@ export function buildTelemetrySnapshot({
     },
     quotas,
     context: contextSnapshot,
+    contextTargets: {
+      agents: recentAgentTargets.slice(0, 20),
+      sessions: otherSessionTargets.slice(0, 15),
+    },
     activeAgents: {
       items: liveAgents.slice(0, 40),
       runningCount: liveAgents.filter((a) => a.isRunning).length,

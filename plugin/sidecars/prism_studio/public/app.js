@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_VERSION = '3.7.0';
+  const FRONTEND_VERSION = '3.7.1';
   const COLOR_CHANNELS = [
     { key: 'accent', label: '主强调色' },
     { key: 'secondary', label: '次折射色' },
@@ -1169,7 +1169,9 @@
     if (limitPill) {
       const limitTag = ctx.limitSourceLabel || (ctx.isNativeLimit ? '官方识别' : '模型规格');
       const limitFmt =
-        ctx.limit === 1048576
+        ctx.limit === 512000
+          ? '512k'
+          : ctx.limit === 1048576
           ? '1M (1024k)'
           : ctx.limit === 1000000
           ? '1M'
@@ -1179,35 +1181,73 @@
       limitPill.textContent = `${limitFmt} · ${limitTag}`;
       limitPill.className = `badge-pill ${ctx.isNativeLimit ? 'running' : ''}`;
       const modelLabel = ctx.speed?.rawModel || ctx.speed?.model || '当前模型';
-      limitPill.title = `已自动识别 ${modelLabel} 上下文窗口上限：${formatNumber(ctx.limit)} tokens（来源：${limitTag}）`;
+      if (ctx.isRuntimeCapped && ctx.apiModelLimit > ctx.limit) {
+        limitPill.title = `Antigravity 客户端默认上限：${formatNumber(ctx.limit)} tokens（到达自动压缩）；底层模型 ${modelLabel} API 理论窗口：${formatNumber(ctx.apiModelLimit)}`;
+      } else {
+        limitPill.title = `已自动识别 ${modelLabel} 上下文窗口上限：${formatNumber(ctx.limit)} tokens（来源：${limitTag}）`;
+      }
     }
 
     const ctxBar = $('#ctx-target-bar');
     const ctxTargetSel = $('#select-context-target');
     const backMainBtn = $('#btn-ctx-back-main');
-    const targetCandidates = scopedAgentsAll;
-    const hasAgentTargets = targetCandidates.length > 0 || !ctxTarget.isMain;
-    ctxBar.hidden = !hasAgentTargets;
+    const ctxTargets = telemetry.contextTargets || {};
+    const agentTargets = Array.isArray(ctxTargets.agents) ? ctxTargets.agents : allAgentsRaw;
+    const sessionTargets = Array.isArray(ctxTargets.sessions) ? ctxTargets.sessions : [];
+    const activeProjId = telemetry.activeProjectId || '';
+
+    // Always keep the context switcher bar visible so users can inspect any main session, subagent, or CLI
+    ctxBar.hidden = false;
     backMainBtn.hidden = ctxTarget.isMain;
-    if (hasAgentTargets) {
-      const opts = [
-        `<option value="main" ${ctxTarget.isMain ? 'selected' : ''}>主会话 · ${escapeHtml(activeConv?.title || '当前会话')}</option>`,
-        ...targetCandidates.map((a) => {
-          const titleShort = a.taskTitle ? a.taskTitle.slice(0, 24) : a.shortId;
-          const pctTxt = typeof a.contextPercent === 'number' ? ` (${a.contextPercent.toFixed(0)}%)` : '';
-          const stateTag = a.isRunning ? '● ' : a.isStalled ? '⚠ ' : '';
-          const selected = !ctxTarget.isMain && ctxTarget.key === a.targetKey ? 'selected' : '';
-          return `<option value="${escapeHtml(a.targetKey)}" ${selected}>${stateTag}${escapeHtml(a.kindLabel)} · ${escapeHtml(titleShort)}${pctTxt}</option>`;
-        }),
-      ];
-      if (!ctxTarget.isMain && !targetCandidates.some((a) => a.targetKey === ctxTarget.key)) {
-        opts.push(
-          `<option value="${escapeHtml(ctxTarget.key)}" selected>${escapeHtml(ctxTarget.kindLabel)} · ${escapeHtml(ctxTarget.title)}</option>`,
-        );
-      }
-      if (document.activeElement !== ctxTargetSel) {
-        setHtmlIfChanged(ctxTargetSel, opts.join(''));
-      }
+
+    const sortByCurProj = (arr) =>
+      [...arr].sort((a, b) => {
+        const aCur = a.projectId === activeProjId ? 0 : 1;
+        const bCur = b.projectId === activeProjId ? 0 : 1;
+        if (aCur !== bCur) return aCur - bCur;
+        return Number(b.lastActiveMs || 0) - Number(a.lastActiveMs || 0);
+      });
+
+    const formatTargetOption = (t, { includeProjPrefix = false } = {}) => {
+      const titleShort = String(t.title || t.taskTitle || t.shortId || '未命名').slice(0, 24);
+      const pctTxt = typeof t.contextPercent === 'number' ? ` (${t.contextPercent.toFixed(0)}%)` : '';
+      const stateTag = t.isRunning ? '● ' : t.isStalled ? '⚠ ' : '';
+      const projTag =
+        includeProjPrefix && t.projectName && t.projectId !== activeProjId ? `[${t.projectName}] ` : '';
+      const selected = !ctxTarget.isMain && ctxTarget.key === t.targetKey ? 'selected' : '';
+      return `<option value="${escapeHtml(t.targetKey)}" ${selected}>${stateTag}${escapeHtml(projTag)}${escapeHtml(t.kindLabel)} · ${escapeHtml(titleShort)}${pctTxt}</option>`;
+    };
+
+    const optParts = [
+      `<option value="main" ${ctxTarget.isMain ? 'selected' : ''}>当前主会话 · ${escapeHtml(activeConv?.title || '当前会话')}</option>`,
+    ];
+    const sortedAgents = sortByCurProj(agentTargets);
+    if (sortedAgents.length > 0) {
+      optParts.push(
+        `<optgroup label="子智能体与 CLI（24h 内）">${sortedAgents
+          .map((a) => formatTargetOption(a, { includeProjPrefix: true }))
+          .join('')}</optgroup>`,
+      );
+    }
+    const sortedSessions = sortByCurProj(sessionTargets);
+    if (sortedSessions.length > 0) {
+      optParts.push(
+        `<optgroup label="其他主会话">${sortedSessions
+          .map((s) => formatTargetOption(s, { includeProjPrefix: true }))
+          .join('')}</optgroup>`,
+      );
+    }
+    const allListedKeys = new Set([
+      ...sortedAgents.map((x) => x.targetKey),
+      ...sortedSessions.map((x) => x.targetKey),
+    ]);
+    if (!ctxTarget.isMain && !allListedKeys.has(ctxTarget.key)) {
+      optParts.push(
+        `<option value="${escapeHtml(ctxTarget.key)}" selected>${escapeHtml(ctxTarget.kindLabel)} · ${escapeHtml(ctxTarget.title)}</option>`,
+      );
+    }
+    if (document.activeElement !== ctxTargetSel) {
+      setHtmlIfChanged(ctxTargetSel, optParts.join(''));
     }
 
     const circumference = 2 * Math.PI * 48;
