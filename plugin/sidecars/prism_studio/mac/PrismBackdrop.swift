@@ -17,16 +17,20 @@ struct CompanionConfig: Decodable {
     let tintHex: String
     let accentHex: String?
     let glassRim: Bool?
+    let seamlessRightPane: Bool?
+    let excludeRightWidth: Double?
     let updatedAt: Double?
 }
 
 final class BackdropCanvasView: NSView {
     private let imageLayer = CALayer()
+    private let rightExcludeMaskLayer = CALayer()
     private let rimLayer = CALayer()
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
     private var cachedImageKey: String = ""
     private var cachedCGImage: CGImage?
+    private var currentExcludeRightWidth: CGFloat = 0
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -36,6 +40,8 @@ final class BackdropCanvasView: NSView {
 
         imageLayer.contentsGravity = .resizeAspectFill
         imageLayer.masksToBounds = true
+
+        rightExcludeMaskLayer.backgroundColor = NSColor.white.cgColor
 
         rimLayer.backgroundColor = NSColor.clear.cgColor
         rimLayer.borderWidth = 1.5
@@ -49,12 +55,25 @@ final class BackdropCanvasView: NSView {
         fatalError("init(coder:) not supported")
     }
 
+    private func updateImageMask() {
+        let exclude = currentExcludeRightWidth
+        if exclude > 1.0 && bounds.width > 240.0 {
+            let clamped = min(exclude, bounds.width * 0.72)
+            let visibleW = max(80.0, bounds.width - clamped)
+            rightExcludeMaskLayer.frame = CGRect(x: 0, y: 0, width: visibleW, height: bounds.height)
+            imageLayer.mask = rightExcludeMaskLayer
+        } else {
+            imageLayer.mask = nil
+        }
+    }
+
     override func layout() {
         super.layout()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         imageLayer.frame = bounds
         rimLayer.frame = bounds.insetBy(dx: 0.75, dy: 0.75)
+        updateImageMask()
         CATransaction.commit()
     }
 
@@ -68,13 +87,39 @@ final class BackdropCanvasView: NSView {
         return NSColor(srgbRed: r, green: g, blue: b, alpha: 1.0)
     }
 
-    /// Emulates hardware Screen-like blending over dark-mode windows via
-    /// luminance-keyed premultiplied RGBA:
-    ///   Out = k*C + (1 - k*L)*D
-    /// Dark sky pixels get tiny alpha so white/colored text stays 95-100% crisp,
-    /// while Milky Way stardust, moon, and warm train windows glow vividly over
-    /// dark Antigravity backgrounds.
-    private func renderLuminanceScreen(_ cgImage: CGImage, strength: Double, edgeFade: Double) -> CGImage? {
+    /// Downscales ultra-high-res wallpapers (e.g. 4K/8K) before CPU/CI filtering
+    /// so dragging opacity/vignette/blur sliders stays instant and smooth.
+    private func downscaleIfNeeded(_ cgImage: CGImage, maxDim: Int = 1920) -> CGImage {
+        let w = cgImage.width
+        let h = cgImage.height
+        let longest = max(w, h)
+        guard longest > maxDim, w > 0, h > 0 else { return cgImage }
+
+        let scale = Double(maxDim) / Double(longest)
+        let nw = max(1, Int(round(Double(w) * scale)))
+        let nh = max(1, Int(round(Double(h) * scale)))
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
+        guard let ctx = CGContext(
+            data: nil,
+            width: nw,
+            height: nh,
+            bitsPerComponent: 8,
+            bytesPerRow: nw * 4,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo
+        ) else { return cgImage }
+
+        ctx.interpolationQuality = .high
+        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: nw, height: nh))
+        return ctx.makeImage() ?? cgImage
+    }
+
+    /// Unified premultiplied RGBA compositor supporting both:
+    /// - "screen": luminance-keyed glow over dark backgrounds (crisp white text, glowing highlights)
+    /// - "soft": uniform misty translucent veil
+    /// Both modes apply smooth radial edge vignette so the edge-fade slider is clearly visible.
+    private func renderBlendedBackdrop(_ cgImage: CGImage, style: String, strength: Double, edgeFade: Double) -> CGImage? {
         let width = cgImage.width
         let height = cgImage.height
         guard width > 0, height > 0 else { return cgImage }
@@ -97,8 +142,10 @@ final class BackdropCanvasView: NSView {
 
         readCtx.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
 
-        let baseK = Float(max(0.08, min(0.92, strength)))
-        let fadeAmt = Float(max(0.0, min(0.80, edgeFade)))
+        let isSoft = (style == "soft")
+        let baseK = Float(max(0.08, min(0.95, strength)))
+        let softAlpha = Float(max(0.05, min(0.68, strength * 0.68)))
+        let fadeAmt = Float(max(0.0, min(0.90, edgeFade)))
         let invW = 1.0 / Float(max(1, width - 1))
         let invH = 1.0 / Float(max(1, height - 1))
 
@@ -110,20 +157,30 @@ final class BackdropCanvasView: NSView {
                 let rowOffset = y * bytesPerRow
                 for x in 0..<width {
                     let nx = (Float(x) * invW - 0.5) * 2.0
-                    let dist2 = min(1.0, (nx * nx * 0.72 + ny2 * 0.55))
-                    let k = baseK * (1.0 - fadeAmt * dist2 * 0.65)
+                    let dist2 = min(1.0, (nx * nx * 0.78 + ny2 * 0.68))
+                    let vigFactor = max(0.04, 1.0 - fadeAmt * dist2 * 0.96)
 
                     let idx = rowOffset + x * 4
                     let r = Float(base[idx])
                     let g = Float(base[idx + 1])
                     let b = Float(base[idx + 2])
-                    let luma = max(r, max(g, b))
 
-                    let a = min(255.0, luma * k)
-                    base[idx] = UInt8(min(a, r * k))
-                    base[idx + 1] = UInt8(min(a, g * k))
-                    base[idx + 2] = UInt8(min(a, b * k))
-                    base[idx + 3] = UInt8(a)
+                    if isSoft {
+                        let aNorm = softAlpha * vigFactor
+                        let a = min(255.0, 255.0 * aNorm)
+                        base[idx] = UInt8(min(a, r * aNorm))
+                        base[idx + 1] = UInt8(min(a, g * aNorm))
+                        base[idx + 2] = UInt8(min(a, b * aNorm))
+                        base[idx + 3] = UInt8(a)
+                    } else {
+                        let k = baseK * vigFactor
+                        let luma = max(r, max(g, b))
+                        let a = min(255.0, luma * k)
+                        base[idx] = UInt8(min(a, r * k))
+                        base[idx + 1] = UInt8(min(a, g * k))
+                        base[idx + 2] = UInt8(min(a, b * k))
+                        base[idx + 3] = UInt8(a)
+                    }
                 }
             }
         }
@@ -166,9 +223,9 @@ final class BackdropCanvasView: NSView {
             return nil
         }
 
-        var working: CGImage = cgRaw
+        var working: CGImage = downscaleIfNeeded(cgRaw)
         if blurBucket > 0 {
-            let input = CIImage(cgImage: cgRaw)
+            let input = CIImage(cgImage: working)
             let clamped = input.clampedToExtent()
             if let filter = CIFilter(name: "CIGaussianBlur") {
                 filter.setValue(clamped, forKey: kCIInputImageKey)
@@ -180,10 +237,8 @@ final class BackdropCanvasView: NSView {
             }
         }
 
-        if style != "soft" {
-            if let screened = renderLuminanceScreen(working, strength: config.opacity, edgeFade: config.vignette) {
-                working = screened
-            }
+        if let blended = renderBlendedBackdrop(working, style: style, strength: config.opacity, edgeFade: config.vignette) {
+            working = blended
         }
 
         cachedImageKey = key
@@ -199,15 +254,13 @@ final class BackdropCanvasView: NSView {
         layer?.cornerRadius = radius
         rimLayer.cornerRadius = max(0, radius - 0.75)
 
+        let seamless = config.seamlessRightPane ?? true
+        currentExcludeRightWidth = seamless ? 0 : CGFloat(max(0, config.excludeRightWidth ?? 0))
+        updateImageMask()
+
         imageLayer.contentsGravity = (config.fit == "contain") ? .resizeAspect : .resizeAspectFill
         imageLayer.contents = loadRenderedImage(config: config)
-
-        // In screen mode opacity is already baked into luminance-keyed premultiplied alpha.
-        if config.blendStyle == "soft" {
-            imageLayer.opacity = Float(max(0.05, min(0.55, config.opacity * 0.55)))
-        } else {
-            imageLayer.opacity = 1.0
-        }
+        imageLayer.opacity = 1.0
 
         if config.glassRim ?? true {
             let accent = parseHexColor(config.accentHex ?? "#6EA8FF")
@@ -241,7 +294,7 @@ final class BackdropController: NSObject {
     private var activityToken: NSObjectProtocol?
 
     private var config: CompanionConfig?
-    private var lastConfigMtime: TimeInterval = 0
+    private var lastConfigSig: String = ""
     private var lastAppliedFrame: NSRect = .zero
     private var lastOrderedRelativeTo: Int = 0
     private var isOrderedIn = false
@@ -344,8 +397,11 @@ final class BackdropController: NSObject {
         guard FileManager.default.fileExists(atPath: configPath) else { return }
         let attrs = try? FileManager.default.attributesOfItem(atPath: configPath)
         let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-        if !force && mtime == lastConfigMtime { return }
-        lastConfigMtime = mtime
+        let inode = (attrs?[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0
+        let size = (attrs?[.size] as? NSNumber)?.uint64Value ?? 0
+        let sig = "\(inode)|\(mtime)|\(size)"
+        if !force && sig == lastConfigSig { return }
+        lastConfigSig = sig
 
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
               let decoded = try? JSONDecoder().decode(CompanionConfig.self, from: data) else {

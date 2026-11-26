@@ -124,8 +124,31 @@ export const BUILTIN_WALLPAPERS = [
   },
 ];
 
-const SCHEMA_VERSION = 3;
-export const ASSET_VERSION = '3.8.1';
+export const GLASS_PRESETS = [
+  {
+    id: 'frosted-dark',
+    name: '深色磨砂',
+    values: { opacity: 100, blur: 18, cardAlpha: 46, glassSaturate: 160, darkness: 18, radius: 16 },
+  },
+  {
+    id: 'liquid-clear',
+    name: '液态通透',
+    values: { opacity: 100, blur: 10, cardAlpha: 30, glassSaturate: 138, darkness: 10, radius: 14 },
+  },
+  {
+    id: 'heavy-mist',
+    name: '奶油厚雾',
+    values: { opacity: 100, blur: 28, cardAlpha: 56, glassSaturate: 170, darkness: 24, radius: 16 },
+  },
+  {
+    id: 'ultra-crisp',
+    name: '极清轻玻',
+    values: { opacity: 100, blur: 4, cardAlpha: 22, glassSaturate: 125, darkness: 6, radius: 12 },
+  },
+];
+
+const SCHEMA_VERSION = 4;
+export const ASSET_VERSION = '3.9.1';
 
 export const DEFAULT_SETTINGS = {
   schemaVersion: SCHEMA_VERSION,
@@ -140,9 +163,11 @@ export const DEFAULT_SETTINGS = {
     onlineSource: 'all', // 'all' | 'catppuccin' | 'nordic' | 'bing' | 'wikimedia'
     onlineMeta: null,
     opacity: 100,
-    blur: 4,
-    darkness: 6,
-    radius: 12,
+    blur: 16,
+    cardAlpha: 44,
+    glassSaturate: 155,
+    darkness: 16,
+    radius: 14,
     fit: 'cover',
   },
   companion: {
@@ -204,7 +229,16 @@ export class PrismStorage {
     this.settingsPath = join(this.dataDir, 'settings.json');
     this.companionConfigPath = join(this.dataDir, 'companion_config.json');
     this.binDir = join(this.dataDir, 'bin');
+    this.rightPaneWidth = 0;
     this.#ensureDirs();
+  }
+
+  setRightPaneWidth(width) {
+    const raw = Number(width);
+    const next = Number.isFinite(raw) && raw >= 120 ? Math.min(2400, Math.round(raw)) : 0;
+    if (next === this.rightPaneWidth) return false;
+    this.rightPaneWidth = next;
+    return true;
   }
 
   #ensureDirs() {
@@ -388,12 +422,13 @@ export class PrismStorage {
 
   syncCompanionConfig(settings) {
     const wpPath = this.resolveWallpaperPath(settings.wallpaper);
+    const seamless = settings.companion?.seamlessRightPane !== false;
     const payload = {
       enabled: Boolean(settings.companion?.enabled),
       imagePath: wpPath,
-      opacity: Math.max(0.08, Math.min(0.92, Number(settings.companion?.opacity ?? 62) / 100)),
-      blur: Math.max(0, Math.min(24, Number(settings.companion?.blur ?? 0))),
-      vignette: Math.max(0, Math.min(0.80, Number(settings.companion?.vignette ?? 18) / 100)),
+      opacity: Math.max(0.08, Math.min(0.95, Number(settings.companion?.opacity ?? 62) / 100)),
+      blur: Math.max(0, Math.min(36, Number(settings.companion?.blur ?? 0))),
+      vignette: Math.max(0, Math.min(0.90, Number(settings.companion?.vignette ?? 18) / 100)),
       cornerRadius: 12,
       onlyWhenFrontmost: Boolean(settings.companion?.onlyWhenFrontmost),
       fit: settings.companion?.fit || settings.wallpaper?.fit || 'cover',
@@ -401,6 +436,8 @@ export class PrismStorage {
       tintHex: settings.colors?.canvas || '#0E121B',
       accentHex: settings.colors?.accent || '#6EA8FF',
       glassRim: settings.companion?.glassRim !== false,
+      seamlessRightPane: seamless,
+      excludeRightWidth: seamless ? 0 : this.rightPaneWidth,
       updatedAt: Date.now(),
     };
     this.#writeAtomic(this.companionConfigPath, JSON.stringify(payload, null, 2));

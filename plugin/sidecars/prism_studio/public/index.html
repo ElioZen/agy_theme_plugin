@@ -269,24 +269,24 @@
                 <span>整窗壁纸亮度</span>
                 <strong id="val-comp-opacity" class="tabular">62%</strong>
               </div>
-              <input id="range-comp-opacity" type="range" min="15" max="90" value="62" />
+              <input id="range-comp-opacity" type="range" min="15" max="95" value="62" />
             </label>
             <label class="slider-item">
               <div class="slider-head">
                 <span>边缘柔光衰减</span>
                 <strong id="val-comp-vignette" class="tabular">18%</strong>
               </div>
-              <input id="range-comp-vignette" type="range" min="0" max="75" value="18" />
+              <input id="range-comp-vignette" type="range" min="0" max="90" value="18" />
             </label>
             <label class="slider-item">
               <div class="slider-head">
                 <span>整窗柔焦</span>
                 <strong id="val-comp-blur" class="tabular">0px</strong>
               </div>
-              <input id="range-comp-blur" type="range" min="0" max="20" value="0" />
+              <input id="range-comp-blur" type="range" min="0" max="36" value="0" />
             </label>
             <div class="checkbox-stack">
-              <label class="checkbox-item">
+              <label class="checkbox-item" title="勾选后右侧面板共享整窗壁纸并暂停本地磨砂；取消勾选可让左侧保留伴侣、右侧独立开启真磨砂">
                 <input id="chk-comp-seamless" type="checkbox" checked />
                 <span>左右窗口壁纸无缝贯穿</span>
               </label>
@@ -333,34 +333,63 @@
 
           <div id="wallpaper-grid" class="wallpaper-grid"></div>
 
+          <div id="seamless-override-bar" class="seamless-notice-bar" hidden>
+            <span>当前为「整窗无缝贯穿」模式，下方磨砂底图参数已由上方伴侣接管</span>
+            <button id="btn-enable-right-frost" class="ghost-btn compact-btn" type="button">切为右侧真磨砂</button>
+          </div>
+
+          <div class="glass-style-row">
+            <span class="fit-label">磨砂预设</span>
+            <div class="seg-group" id="glass-style-group">
+              <button class="seg-btn" data-glass-preset="frosted-dark" type="button">深色磨砂</button>
+              <button class="seg-btn" data-glass-preset="liquid-clear" type="button">液态通透</button>
+              <button class="seg-btn" data-glass-preset="heavy-mist" type="button">奶油厚雾</button>
+              <button class="seg-btn" data-glass-preset="ultra-crisp" type="button">极清轻玻</button>
+            </div>
+          </div>
+
           <div class="sliders-grid">
-            <label class="slider-item">
+            <label class="slider-item" data-right-pane-only="1">
               <div class="slider-head">
                 <span>壁纸透明度</span>
                 <strong id="val-wp-opacity" class="tabular">100%</strong>
               </div>
               <input id="range-wp-opacity" type="range" min="0" max="100" value="100" />
             </label>
-            <label class="slider-item">
+            <label class="slider-item" data-right-pane-only="1">
               <div class="slider-head">
                 <span>磨砂模糊</span>
-                <strong id="val-wp-blur" class="tabular">4px</strong>
+                <strong id="val-wp-blur" class="tabular">16px</strong>
               </div>
-              <input id="range-wp-blur" type="range" min="0" max="24" value="4" />
+              <input id="range-wp-blur" type="range" min="0" max="36" value="16" />
             </label>
             <label class="slider-item">
               <div class="slider-head">
-                <span>暗度遮罩</span>
-                <strong id="val-wp-darkness" class="tabular">6%</strong>
+                <span>卡片玻璃浓度</span>
+                <strong id="val-wp-card-alpha" class="tabular">44%</strong>
               </div>
-              <input id="range-wp-darkness" type="range" min="0" max="80" value="6" />
+              <input id="range-wp-card-alpha" type="range" min="10" max="85" value="44" />
+            </label>
+            <label class="slider-item" data-right-pane-only="1">
+              <div class="slider-head">
+                <span>玻璃折射饱和</span>
+                <strong id="val-wp-saturate" class="tabular">155%</strong>
+              </div>
+              <input id="range-wp-saturate" type="range" min="100" max="220" value="155" />
+            </label>
+            <label class="slider-item" data-right-pane-only="1">
+              <div class="slider-head">
+                <span>暗度遮罩</span>
+                <strong id="val-wp-darkness" class="tabular">16%</strong>
+              </div>
+              <input id="range-wp-darkness" type="range" min="0" max="80" value="16" />
             </label>
             <label class="slider-item">
               <div class="slider-head">
                 <span>卡片圆角</span>
-                <strong id="val-wp-radius" class="tabular">12px</strong>
+                <strong id="val-wp-radius" class="tabular">14px</strong>
               </div>
-              <input id="range-wp-radius" type="range" min="4" max="22" value="12" />
+              <input id="range-wp-radius" type="range" min="4" max="24" value="14" />
             </label>
           </div>
 

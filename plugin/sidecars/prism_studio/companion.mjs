@@ -42,6 +42,15 @@ export class MacBackdropCompanion {
     };
   }
 
+  #needsCompile() {
+    if (!existsSync(this.binPath)) return true;
+    try {
+      return statSync(SWIFT_SOURCE).mtimeMs > statSync(this.binPath).mtimeMs;
+    } catch {
+      return true;
+    }
+  }
+
   async ensureCompiled() {
     if (process.platform !== 'darwin') {
       throw new Error('整窗氛围伴侣仅支持 macOS');
@@ -50,16 +59,7 @@ export class MacBackdropCompanion {
       throw new Error('缺少 PrismBackdrop.swift 源码');
     }
 
-    const needCompile = (() => {
-      if (!existsSync(this.binPath)) return true;
-      try {
-        return statSync(SWIFT_SOURCE).mtimeMs > statSync(this.binPath).mtimeMs;
-      } catch {
-        return true;
-      }
-    })();
-
-    if (!needCompile) return this.binPath;
+    if (!this.#needsCompile()) return this.binPath;
     if (this.#compilePromise) return this.#compilePromise;
 
     this.#status = 'compiling';
@@ -98,8 +98,12 @@ export class MacBackdropCompanion {
       return this.getState();
     }
     this.#storage.syncCompanionConfig(settings);
-    if (this.#child && !this.#child.killed && this.#child.exitCode === null) {
+    const isRunning = Boolean(this.#child && !this.#child.killed && this.#child.exitCode === null);
+    if (isRunning && !this.#needsCompile()) {
       return this.getState();
+    }
+    if (isRunning) {
+      this.stop();
     }
 
     try {

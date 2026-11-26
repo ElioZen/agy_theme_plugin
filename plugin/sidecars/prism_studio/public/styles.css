@@ -9,13 +9,14 @@
   --prism-muted: rgba(220, 232, 255, 0.76);
   --prism-border: rgba(255, 255, 255, 0.13);
   --prism-border-soft: rgba(255, 255, 255, 0.08);
-  --prism-specular: rgba(255, 255, 255, 0.20);
-  --prism-blur: 4px;
-  --prism-radius: 12px;
-  --prism-card-alpha: 0.22;
-  --prism-surface-alpha: 0.28;
+  --prism-specular: rgba(255, 255, 255, 0.16);
+  --prism-blur: 16px;
+  --prism-glass-saturate: 1.55;
+  --prism-radius: 14px;
+  --prism-card-alpha: 0.44;
+  --prism-surface-alpha: 0.52;
   --prism-wp-opacity: 1;
-  --prism-scrim: 0.06;
+  --prism-scrim: 0.16;
 }
 
 body.theme-light {
@@ -24,8 +25,6 @@ body.theme-light {
   --prism-border: rgba(20, 32, 62, 0.14);
   --prism-border-soft: rgba(20, 32, 62, 0.08);
   --prism-specular: rgba(255, 255, 255, 0.85);
-  --prism-card-alpha: 0.52;
-  --prism-surface-alpha: 0.62;
 }
 
 * { box-sizing: border-box; }
@@ -82,7 +81,7 @@ body.theme-light .scrim-layer {
 }
 
 body.companion-seamless {
-  background: #13161F !important;
+  background: color-mix(in srgb, var(--prism-canvas) 70%, #13161F) !important;
 }
 body.companion-seamless .wallpaper-layer,
 body.companion-seamless .scrim-layer {
@@ -96,7 +95,10 @@ body.companion-seamless .glass-card {
 body.companion-seamless .glass-card {
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.045) 0%, rgba(255, 255, 255, 0.01) 100%),
-    rgba(16, 20, 32, 0.28);
+    color-mix(in srgb, var(--prism-card) calc(var(--prism-card-alpha) * 100%), transparent);
+}
+body.companion-seamless .slider-item[data-right-pane-only="1"] {
+  opacity: 0.42;
 }
 
 /* ==================== COMPACT SHELL & TOPBAR ==================== */
@@ -111,8 +113,8 @@ body.companion-seamless .glass-card {
 
 .glass-surface {
   background: color-mix(in srgb, var(--prism-surface) calc(var(--prism-surface-alpha) * 100%), transparent);
-  backdrop-filter: blur(var(--prism-blur)) saturate(1.25);
-  -webkit-backdrop-filter: blur(var(--prism-blur)) saturate(1.25);
+  backdrop-filter: blur(var(--prism-blur)) saturate(var(--prism-glass-saturate));
+  -webkit-backdrop-filter: blur(var(--prism-blur)) saturate(var(--prism-glass-saturate));
 }
 
 .topbar {
@@ -210,12 +212,14 @@ body.companion-seamless .glass-card {
   border-radius: var(--prism-radius);
   padding: 12px 13px;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.065) 0%, rgba(255, 255, 255, 0.012) 100%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.055) 0%, rgba(255, 255, 255, 0.008) 45%, rgba(0, 0, 0, 0.06) 100%),
     color-mix(in srgb, var(--prism-card) calc(var(--prism-card-alpha) * 100%), transparent);
-  backdrop-filter: blur(var(--prism-blur)) saturate(1.28);
-  -webkit-backdrop-filter: blur(var(--prism-blur)) saturate(1.28);
+  backdrop-filter: blur(var(--prism-blur)) saturate(var(--prism-glass-saturate));
+  -webkit-backdrop-filter: blur(var(--prism-blur)) saturate(var(--prism-glass-saturate));
   border: 1px solid var(--prism-border);
-  box-shadow: inset 0 1px 0 var(--prism-specular);
+  box-shadow:
+    inset 0 1px 0 var(--prism-specular),
+    0 8px 26px -8px rgba(0, 0, 0, 0.36);
   contain: layout style;
   -webkit-backface-visibility: hidden;
   backface-visibility: hidden;
@@ -1458,10 +1462,36 @@ body.theme-light .seg-group { background: rgba(15, 23, 42, 0.06); }
 }
 
 .sliders-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 12px; }
-.slider-item { display: flex; flex-direction: column; gap: 5px; }
+.slider-item { display: flex; flex-direction: column; gap: 5px; transition: opacity 0.18s ease; }
 .slider-head { display: flex; justify-content: space-between; font-size: 11px; color: var(--prism-muted); }
 .slider-head strong { color: var(--prism-text); }
 input[type="range"] { width: 100%; accent-color: var(--prism-accent); cursor: pointer; margin: 0; }
+
+.seamless-notice-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 7px 9px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--prism-secondary) 14%, rgba(8, 12, 24, 0.42));
+  border: 1px solid color-mix(in srgb, var(--prism-secondary) 45%, var(--prism-border));
+  font-size: 11px;
+  color: var(--prism-text);
+  line-height: 1.35;
+}
+
+.glass-style-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 11px;
+  padding-bottom: 9px;
+  border-bottom: 1px solid var(--prism-border-soft);
+}
 
 .fit-row {
   display: flex;

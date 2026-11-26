@@ -8,6 +8,7 @@ import {
   BUILTIN_PRESETS,
   BUILTIN_WALLPAPERS,
   BUILTIN_WALLPAPERS_DIR,
+  GLASS_PRESETS,
   PUBLIC_DIR,
   PrismStorage,
 } from './storage.mjs';
@@ -45,6 +46,7 @@ function buildStatePayload(settings = storage.loadSettings()) {
     assetVersion: ASSET_VERSION,
     settings,
     builtinPresets: BUILTIN_PRESETS,
+    glassPresets: GLASS_PRESETS,
     builtinWallpapers: BUILTIN_WALLPAPERS.filter((w) =>
       existsSync(join(BUILTIN_WALLPAPERS_DIR, w.file)),
     ),
@@ -108,6 +110,17 @@ app.api('/api/settings', async (data) => {
   const updated = storage.saveSettings(data?.settings || data || {});
   await companion.syncWithSettings(updated);
   return buildStatePayload(updated);
+});
+
+app.api('/api/pane-metrics', (data) => {
+  const changed = storage.setRightPaneWidth(data?.width);
+  if (changed) {
+    const current = storage.loadSettings();
+    if (current.companion?.enabled && current.companion?.seamlessRightPane === false) {
+      storage.syncCompanionConfig(current);
+    }
+  }
+  return { ok: true, rightPaneWidth: storage.rightPaneWidth };
 });
 
 app.api('/api/reset-colors', async () => {
@@ -263,7 +276,7 @@ app.api(
         ? data.showRecentAgents === 'true' || data.showRecentAgents === true
         : Boolean(settings.telemetry.showRecentAgents);
 
-    const snap = buildTelemetrySnapshot({
+    const { quotaActivity, ...clientSnap } = buildTelemetrySnapshot({
       conversationId,
       hostConversationId,
       activeWorkspaceUri,
@@ -278,8 +291,8 @@ app.api(
       resolveModelContextWindow: (rawModel) => quotaFetcher.getModelContextWindow(rawModel),
     });
     return {
-      ...snap,
-      officialQuota: quotaFetcher.getSnapshot(),
+      ...clientSnap,
+      officialQuota: quotaFetcher.getSnapshot(quotaActivity),
     };
   },
   'GET',

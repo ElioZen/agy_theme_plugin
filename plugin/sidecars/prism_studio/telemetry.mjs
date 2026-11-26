@@ -1332,6 +1332,101 @@ function buildQuotaWindowStats(turns, windowMs, anchor, nowMs) {
   };
 }
 
+function toLocalDayKey(ms) {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function buildFamilyQuotaActivity(turns, cutoffMs) {
+  const hourlyMap = new Map();
+  const dailyCost = Object.create(null);
+  const hourWeight = new Array(24).fill(0);
+  const activeDays = new Set();
+  let totalWeight = 0;
+
+  for (const t of turns) {
+    if (!t.ts || t.ts < cutoffMs) continue;
+    const cost = estimateCostUsd(t.model, t.uncachedInput, t.cacheRead, t.output);
+    if (!Number.isFinite(cost) || cost <= 0) continue;
+    const hourMs = Math.floor(t.ts / 3_600_000) * 3_600_000;
+    hourlyMap.set(hourMs, (hourlyMap.get(hourMs) || 0) + cost);
+
+    const dayKey = toLocalDayKey(t.ts);
+    dailyCost[dayKey] = (dailyCost[dayKey] || 0) + cost;
+    activeDays.add(dayKey);
+
+    const h = new Date(t.ts).getHours();
+    hourWeight[h] += cost;
+    totalWeight += cost;
+  }
+
+  const hourlyBuckets = [...hourlyMap.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([hourMs, costUsd]) => ({ hourMs, costUsd }));
+
+  return {
+    hourlyBuckets,
+    dailyCost,
+    hourWeight,
+    totalWeight,
+    activeDayCount: activeDays.size,
+  };
+}
+
+function normalizeHourlyShare(hourWeight, totalWeight, activeDayCount) {
+  const uniform = 1 / 24;
+  if (!totalWeight || totalWeight <= 0 || activeDayCount <= 0) {
+    return new Array(24).fill(uniform);
+  }
+  // Smooth empirical diurnal curve with uniform Laplace prior (stronger smoothing when few active days)
+  const uniformAlpha = activeDayCount >= 5 ? 0.15 : activeDayCount >= 2 ? 0.35 : 0.65;
+  return hourWeight.map((w) => (1 - uniformAlpha) * (w / totalWeight) + uniformAlpha * uniform);
+}
+
+function buildQuotaActivityProfile(agyGeminiTurns, agyClaudeTurns, nowMs) {
+  const LOOKBACK_MS = 21 * 24 * 60 * 60 * 1000;
+  const cutoffMs = nowMs - LOOKBACK_MS;
+  const gemini = buildFamilyQuotaActivity(agyGeminiTurns, cutoffMs);
+  const claude = buildFamilyQuotaActivity(agyClaudeTurns, cutoffMs);
+
+  const globalHourWeight = new Array(24).fill(0);
+  let globalTotalWeight = 0;
+  const globalDays = new Set([
+    ...Object.keys(gemini.dailyCost),
+    ...Object.keys(claude.dailyCost),
+  ]);
+  for (let h = 0; h < 24; h += 1) {
+    const w = gemini.hourWeight[h] + claude.hourWeight[h];
+    globalHourWeight[h] = w;
+    globalTotalWeight += w;
+  }
+
+  const globalHourlyShare = normalizeHourlyShare(globalHourWeight, globalTotalWeight, globalDays.size);
+  return {
+    generatedAtMs: nowMs,
+    globalHourlyShare,
+    globalActiveDayCount: globalDays.size,
+    gemini: {
+      hourlyBuckets: gemini.hourlyBuckets,
+      dailyCost: gemini.dailyCost,
+      hourlyShare:
+        gemini.activeDayCount >= 3
+          ? normalizeHourlyShare(gemini.hourWeight, gemini.totalWeight, gemini.activeDayCount)
+          : globalHourlyShare,
+      activeDayCount: gemini.activeDayCount,
+    },
+    claude: {
+      hourlyBuckets: claude.hourlyBuckets,
+      dailyCost: claude.dailyCost,
+      hourlyShare:
+        claude.activeDayCount >= 3
+          ? normalizeHourlyShare(claude.hourWeight, claude.totalWeight, claude.activeDayCount)
+          : globalHourlyShare,
+      activeDayCount: claude.activeDayCount,
+    },
+  };
+}
+
 function getRangeCutoffMs(range) {
   const now = new Date();
   if (range === 'today') {
@@ -1974,6 +2069,7 @@ export function buildTelemetrySnapshot({
       d7: buildQuotaWindowStats(agyClaudeTurns, SEVEN_D, quotaAnchor?.claude7d, nowMs),
     },
   };
+  const quotaActivity = buildQuotaActivityProfile(agyGeminiTurns, agyClaudeTurns, nowMs);
 
   // ==================== ACTIVE CLI & SUBAGENT MONITOR ====================
   // Show ONLY live/active/stalled agents by default (running, stalled > 20m, or touched within 3 min),
@@ -2471,6 +2567,7 @@ export function buildTelemetrySnapshot({
       all: allProjectsStats,
     },
     quotas,
+    quotaActivity,
     context: contextSnapshot,
     contextTargets: {
       agents: recentAgentTargets.slice(0, 20),
