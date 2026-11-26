@@ -153,23 +153,249 @@ export function loadConfiguredProjects() {
   return projects.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+const gitWorktreeRootCache = new Map();
+
+function resolveGitWorktreeMainRoot(dirPath) {
+  const norm = normalizePathFromUri(dirPath);
+  if (!norm) return '';
+  if (gitWorktreeRootCache.has(norm)) return gitWorktreeRootCache.get(norm);
+
+  let mainRoot = '';
+  try {
+    const dotGit = join(norm, '.git');
+    if (existsSync(dotGit) && statSync(dotGit).isFile()) {
+      const content = readFileSync(dotGit, 'utf-8');
+      const m = /^\s*gitdir:\s*(.+?)\s*$/m.exec(content);
+      if (m) {
+        const gitDir = m[1].trim();
+        const wtMatch = /^(.+?)\/\.git\/worktrees\/[^/]+\/?$/.exec(gitDir);
+        if (wtMatch) {
+          mainRoot = normalizePathFromUri(wtMatch[1]);
+        }
+      }
+    }
+  } catch {
+    // ignore filesystem errors on removed worktrees
+  }
+  gitWorktreeRootCache.set(norm, mainRoot);
+  return mainRoot;
+}
+
 function matchProjectByPathOrId(projects, { projectId = '', paths = [] } = {}) {
   if (projectId) {
     const byId = projects.find((p) => p.id === projectId);
     if (byId) return byId;
   }
+
+  let bestExact = null;
+  let bestExactLen = -1;
+  let bestWorktree = null;
+  let bestWorktreeLen = -1;
+
   for (const rawP of paths) {
     const p = normalizePathFromUri(rawP);
     if (!p) continue;
     for (const proj of projects) {
       for (const folder of proj.folders) {
         if (p === folder || p.startsWith(`${folder}/`)) {
-          return proj;
+          if (folder.length > bestExactLen) {
+            bestExact = proj;
+            bestExactLen = folder.length;
+          }
+        } else if (
+          p === `${folder}-worktrees` ||
+          p.startsWith(`${folder}-worktrees/`) ||
+          p === `${folder}_worktrees` ||
+          p.startsWith(`${folder}_worktrees/`) ||
+          p === `${folder}.worktrees` ||
+          p.startsWith(`${folder}.worktrees/`)
+        ) {
+          if (folder.length > bestWorktreeLen) {
+            bestWorktree = proj;
+            bestWorktreeLen = folder.length;
+          }
+        }
+      }
+    }
+    if (!bestExact && !bestWorktree) {
+      const mainRoot = resolveGitWorktreeMainRoot(p);
+      if (mainRoot) {
+        for (const proj of projects) {
+          for (const folder of proj.folders) {
+            if (mainRoot === folder || mainRoot.startsWith(`${folder}/`)) {
+              if (folder.length > bestWorktreeLen) {
+                bestWorktree = proj;
+                bestWorktreeLen = folder.length;
+              }
+            }
+          }
         }
       }
     }
   }
+  return bestExact || bestWorktree || null;
+}
+
+const UUID_GLOBAL_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+// Matches only genuine CLI invocation / JSON result / resume UUIDs (ignores `ls` listings & handoff doc prose)
+const STRONG_CLI_UUID_RE =
+  /(?:\\?"(?:conversation_id|conversationId|session_id|sessionId|thread_id|threadId)\\?"\s*:\s*\\?"|session\s+id\s*:\s*|--(?:conversation|resume)\s+(?:\\?["'])?|codex\s+exec\s+resume[^\n]{0,200}?\s+)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/gi;
+const BRAIN_PATH_UUID_RE = /\/brain\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\//gi;
+
+function extractRegexGroupUuids(text, re, selfId = '') {
+  const out = new Set();
+  if (!text) return out;
+  const selfLower = String(selfId || '').toLowerCase();
+  re.lastIndex = 0;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const lo = m[1].toLowerCase();
+    if (lo !== selfLower) out.add(lo);
+  }
+  return out;
+}
+
+function extractStrongCliUuids(text, selfId = '') {
+  return extractRegexGroupUuids(text, STRONG_CLI_UUID_RE, selfId);
+}
+
+function extractBrainPathUuids(text, selfId = '') {
+  return extractRegexGroupUuids(text, BRAIN_PATH_UUID_RE, selfId);
+}
+
+function extractReferencedUuidsFromCodexLines(lines, selfId = '') {
+  const out = new Set();
+  if (!Array.isArray(lines) || !lines.length) return out;
+  const selfLower = String(selfId || '').toLowerCase();
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (!line || line.length < 36 || line.length > 131072) continue;
+    if (
+      !line.includes('codex') &&
+      !line.includes('session') &&
+      !line.includes('thread') &&
+      !line.includes('agent') &&
+      !line.includes('brain/') &&
+      !line.includes('item.completed') &&
+      !line.includes('turn.completed')
+    ) {
+      continue;
+    }
+    const matches = line.match(UUID_GLOBAL_RE);
+    if (!matches) continue;
+    for (const m of matches) {
+      const lo = m.toLowerCase();
+      if (lo !== selfLower) out.add(lo);
+    }
+  }
+  return out;
+}
+
+function normalizePromptMatchText(rawText) {
+  return String(rawText || '')
+    .replace(/<\/?USER_REQUEST>/gi, ' ')
+    .replace(/<\/?ADDITIONAL_METADATA>[\s\S]*$/gi, ' ')
+    .replace(/\\r\\n|\\n|\\r|\\t/g, ' ')
+    .replace(/\\["'`]/g, '')
+    .replace(/["'`]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function buildPromptProbes(rawPrompt) {
+  let clean = normalizePromptMatchText(rawPrompt);
+  if (!clean) return [];
+  // Strip leading slash commands (e.g. "/plan " auto-injected by `agy --mode plan`)
+  clean = clean.replace(/^\/[a-z0-9_-]{1,24}\s+/i, '').trim();
+  if (clean.length < 28) return [];
+
+  const probes = [];
+  const p1 = clean.slice(0, Math.min(clean.length, 96));
+  if (p1.length >= 28) probes.push(p1);
+  // Add a second probe further into the task body to avoid false collisions on shared worker preambles
+  if (clean.length >= 165) {
+    const p2 = clean.slice(96, Math.min(clean.length, 168)).trim();
+    if (p2.length >= 40) probes.push(p2);
+  }
+  return probes;
+}
+
+function parseToolCallArgsObject(rawArgs) {
+  if (!rawArgs) return null;
+  if (typeof rawArgs === 'object') return rawArgs;
+  if (typeof rawArgs === 'string') {
+    const trimmed = rawArgs.trim();
+    if (trimmed.startsWith('{')) {
+      try {
+        return JSON.parse(trimmed);
+      } catch {
+        return null;
+      }
+    }
+  }
   return null;
+}
+
+const scratchSignalsCache = new Map();
+
+function readConversationScratchSignals(convDir, selfId = '') {
+  const scratchDir = join(convDir, 'scratch');
+  if (!existsSync(scratchDir)) return { uuids: new Set(), dispatchNorm: '' };
+
+  let entries = [];
+  let dirMtimeMs = 0;
+  try {
+    dirMtimeMs = statSync(scratchDir).mtimeMs;
+    entries = readdirSync(scratchDir, { withFileTypes: true });
+  } catch {
+    return { uuids: new Set(), dispatchNorm: '' };
+  }
+
+  const fileInfos = [];
+  let sigParts = `${dirMtimeMs}`;
+  for (const ent of entries) {
+    if (!ent.isFile()) continue;
+    if (!/\.(txt|md|json|jsonl|log)$/i.test(ent.name)) continue;
+    const full = join(scratchDir, ent.name);
+    try {
+      const st = statSync(full);
+      if (st.size <= 0 || st.size > 512 * 1024) continue;
+      fileInfos.push({ full, name: ent.name, size: st.size, mtimeMs: st.mtimeMs });
+      sigParts += `|${ent.name}:${st.mtimeMs}:${st.size}`;
+    } catch {
+      // ignore
+    }
+  }
+
+  const cached = scratchSignalsCache.get(scratchDir);
+  if (cached && cached.sig === sigParts) return cached.data;
+
+  const uuids = new Set();
+  const promptParts = [];
+  let promptBudget = 120_000;
+  const selfLower = String(selfId || '').toLowerCase();
+
+  for (const fi of fileInfos) {
+    let content = '';
+    try {
+      content = readFileSync(fi.full, 'utf-8');
+    } catch {
+      continue;
+    }
+    const strongMatches = extractStrongCliUuids(content, selfLower);
+    for (const lo of strongMatches) uuids.add(lo);
+    if (promptBudget > 0 && /\.(txt|md)$/i.test(fi.name)) {
+      const head = normalizePromptMatchText(content.slice(0, 1200));
+      if (head.length >= 28) {
+        promptParts.push(head);
+        promptBudget -= head.length;
+      }
+    }
+  }
+
+  const data = { uuids, dispatchNorm: promptParts.join('\n') };
+  scratchSignalsCache.set(scratchDir, { sig: sigParts, data });
+  return data;
 }
 
 // ==================== TRANSCRIPT PARSER (AGY Desktop + AGY CLI) ====================
@@ -451,7 +677,7 @@ function estimateAgyStepReasoningTokens(obj, outTok, tcJson = '') {
   return Math.round(Math.max(0, Math.min(outTok, est)));
 }
 
-function parseAgyTranscript(filePath) {
+function parseAgyTranscript(filePath, convId = '') {
   let stat;
   try {
     stat = statSync(filePath);
@@ -477,6 +703,7 @@ function parseAgyTranscript(filePath) {
   let thinkingChars = 0;
   let toolChars = 0;
   let lastModel = '';
+  let firstStepAt = 0;
   let lastStepAt = 0;
   let prevStepMs = 0;
   let totalSteps = 0;
@@ -485,6 +712,10 @@ function parseAgyTranscript(filePath) {
   let firstUserPrompt = '';
   let currentTurnOutput = 0;
   let currentTurnSteps = 0;
+  let hasCliInvocation = false;
+  const cliCmdSnippets = [];
+  const writtenPromptSnippets = [];
+  let writtenPromptBudget = 160_000;
 
   for (const line of text.split('\n')) {
     if (!line.trim()) continue;
@@ -498,6 +729,7 @@ function parseAgyTranscript(filePath) {
     totalSteps += 1;
     lastObj = obj;
     const ts = parseTimestampMs(obj.created_at);
+    if (ts > 0 && (!firstStepAt || ts < firstStepAt)) firstStepAt = ts;
     if (ts > lastStepAt) lastStepAt = ts;
 
     // Close out the preceding CHECKPOINT's exact duration using the immediately following step's start time
@@ -544,6 +776,30 @@ function parseAgyTranscript(filePath) {
         const lastTc = obj.tool_calls[obj.tool_calls.length - 1];
         const detail = summarizeToolCallDetail(lastTc?.name || lastTc?.tool_name || '', lastTc?.args || lastTc?.arguments);
         if (detail) lastToolDetail = detail;
+
+        for (const tc of obj.tool_calls) {
+          const tcName = String(tc?.name || tc?.tool_name || '').replace(/^default_api:/, '');
+          const argsObj = parseToolCallArgsObject(tc?.args ?? tc?.arguments);
+          if (!argsObj) continue;
+          if (tcName === 'run_command' || tcName === 'exec_command' || tcName === 'shell_command') {
+            const cmdRaw = unwrapArgScalar(argsObj.CommandLine || argsObj.cmd || argsObj.command || '');
+            if (cmdRaw && /\b(?:agy|codex)\b/i.test(cmdRaw)) {
+              hasCliInvocation = true;
+              const normCmd = normalizePromptMatchText(cmdRaw.slice(0, 2400));
+              if (normCmd) cliCmdSnippets.push(normCmd);
+            }
+          } else if (tcName === 'write_file' && writtenPromptBudget > 0) {
+            const pth = unwrapArgScalar(argsObj.Path || argsObj.TargetFile || argsObj.path || '');
+            const contentRaw = unwrapArgScalar(argsObj.Content || argsObj.content || '');
+            if (contentRaw.length >= 28 && (/\/scratch\/|prompt|\/tmp\/|\.(?:txt|md)$/i.test(pth) || hasCliInvocation)) {
+              const normBody = normalizePromptMatchText(contentRaw.slice(0, 1200));
+              if (normBody.length >= 28) {
+                writtenPromptSnippets.push(normBody);
+                writtenPromptBudget -= normBody.length;
+              }
+            }
+          }
+        }
       }
 
       let tokPerSec = null;
@@ -560,7 +816,7 @@ function parseAgyTranscript(filePath) {
         turns.push({
           stepIndex: Number(obj.step_index || 0),
           ts,
-          model: model || 'unknown',
+          model: model || lastModel || 'unknown',
           uncachedInput: inTok,
           cacheRead: cacheTok,
           output: outTok,
@@ -614,6 +870,20 @@ function parseAgyTranscript(filePath) {
     if (ts > 0) prevStepMs = ts;
   }
 
+  // Backfill any early unknown-model turns if a later step established the model
+  if (lastModel) {
+    for (const t of turns) {
+      if (t.model === 'unknown') t.model = lastModel;
+    }
+  }
+
+  const referencedUuids = extractStrongCliUuids(text, convId);
+  const brainPathUuids = extractBrainPathUuids(text, convId);
+  const cliDispatchBlob = hasCliInvocation
+    ? [...cliCmdSnippets, ...writtenPromptSnippets].join('\n')
+    : '';
+  const promptProbes = buildPromptProbes(firstUserPrompt);
+
   // Infer exact live activity & whether the turn has truly finished:
   // In Antigravity transcripts, every completed step has status === 'DONE'.
   // A turn is ONLY finished when the last step is a PLANNER_RESPONSE with status === 'DONE' AND no pending tool_calls!
@@ -656,12 +926,18 @@ function parseAgyTranscript(filePath) {
     checkpoints,
     totalSteps,
     lastModel,
+    firstStepAt,
     lastStepAt,
     mtimeMs: stat.mtimeMs,
     activity,
     activityKind,
     lastToolDetail,
     firstUserPrompt,
+    promptProbes,
+    referencedUuids,
+    brainPathUuids,
+    hasCliInvocation,
+    cliDispatchBlob,
     isTurnFinished,
     currentTurnOutput,
     currentTurnSteps,
@@ -681,14 +957,17 @@ function parseAgyTranscript(filePath) {
 // ==================== CODEX CLI SESSION PARSER (~/.codex/sessions) ====================
 const codexCache = new Map();
 
-function listRecentCodexFiles(maxAgeMs = 7 * 24 * 60 * 60 * 1000) {
-  const root = join(homedir(), '.codex', 'sessions');
-  if (!existsSync(root)) return [];
-  const cutoff = Date.now() - maxAgeMs;
+function listRecentCodexFiles(maxAgeMs = 7 * 24 * 60 * 60 * 1000, maxFiles = 2000) {
+  const roots = [
+    join(homedir(), '.codex', 'sessions'),
+    join(homedir(), '.codex', 'archived_sessions'),
+  ];
+  const cutoff = maxAgeMs > 0 ? Date.now() - maxAgeMs : 0;
   const results = [];
+  const seen = new Set();
 
   function walk(dir, depth) {
-    if (depth > 4) return;
+    if (depth > 5 || !existsSync(dir)) return;
     let entries;
     try {
       entries = readdirSync(dir, { withFileTypes: true });
@@ -699,10 +978,11 @@ function listRecentCodexFiles(maxAgeMs = 7 * 24 * 60 * 60 * 1000) {
       const full = join(dir, ent.name);
       if (ent.isDirectory()) {
         walk(full, depth + 1);
-      } else if (ent.isFile() && ent.name.endsWith('.jsonl')) {
+      } else if (ent.isFile() && ent.name.endsWith('.jsonl') && !seen.has(full)) {
+        seen.add(full);
         try {
           const st = statSync(full);
-          if (st.mtimeMs >= cutoff) {
+          if (cutoff <= 0 || st.mtimeMs >= cutoff) {
             results.push({ path: full, mtimeMs: st.mtimeMs, size: st.size });
           }
         } catch {
@@ -712,9 +992,9 @@ function listRecentCodexFiles(maxAgeMs = 7 * 24 * 60 * 60 * 1000) {
     }
   }
 
-  walk(root, 0);
+  for (const root of roots) walk(root, 0);
   results.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  return results.slice(0, 40);
+  return maxFiles > 0 ? results.slice(0, maxFiles) : results;
 }
 
 const codexHeaderCwdCache = new Map();
@@ -770,6 +1050,7 @@ function parseCodexSession(filePath, statInfo) {
   }
 
   let sessionId = basename(filePath, '.jsonl');
+  let parentThreadId = '';
   let cwd = '';
   let originator = '';
   let source = '';
@@ -780,6 +1061,7 @@ function parseCodexSession(filePath, statInfo) {
   let cachedTokens = 0;
   let outputTokens = 0;
   let reasoningTokens = 0;
+  let firstEventTs = 0;
   let lastEventTs = 0;
   let isCompleted = false;
   let activity = '运行中';
@@ -830,14 +1112,20 @@ function parseCodexSession(filePath, statInfo) {
     }
 
     const ts = parseTimestampMs(obj.timestamp);
+    if (ts > 0 && (!firstEventTs || ts < firstEventTs)) firstEventTs = ts;
     if (ts > lastEventTs) lastEventTs = ts;
     const p = obj.payload || {};
 
     if (obj.type === 'session_meta') {
       if (p.id || p.session_id) sessionId = String(p.id || p.session_id);
+      const rawParentTid =
+        p.parent_thread_id ||
+        p.source?.subagent?.thread_spawn?.parent_thread_id ||
+        '';
+      if (rawParentTid) parentThreadId = String(rawParentTid).toLowerCase();
       if (p.cwd) cwd = String(p.cwd);
       if (p.originator) originator = String(p.originator);
-      if (p.source) source = String(p.source);
+      if (p.source) source = typeof p.source === 'string' ? p.source : 'subagent';
     } else if (obj.type === 'turn_context') {
       if (p.model) model = String(p.model);
       if (p.effort || p.reasoning_effort) effort = String(p.effort || p.reasoning_effort);
@@ -1041,8 +1329,13 @@ function parseCodexSession(filePath, statInfo) {
   }
 
   const uncachedInput = Math.max(0, inputTokens - cachedTokens);
+  const referencedUuids = extractReferencedUuidsFromCodexLines(lines, sessionId);
+  const brainPathUuids = extractBrainPathUuids(text, sessionId);
+  const promptProbes = buildPromptProbes(firstUserPrompt);
   const data = {
     id: sessionId,
+    idLower: String(sessionId || '').toLowerCase(),
+    parentThreadId,
     shortId: sessionId.slice(-8),
     filePath,
     cwd,
@@ -1066,6 +1359,7 @@ function parseCodexSession(filePath, statInfo) {
     lastContextTokens,
     lastModel: model || 'codex',
     lastEffort: effort,
+    firstEventTs: firstEventTs || statInfo.mtimeMs,
     lastActiveMs: Math.max(lastEventTs, statInfo.mtimeMs),
     mtimeMs: statInfo.mtimeMs,
     isCompleted,
@@ -1073,6 +1367,9 @@ function parseCodexSession(filePath, statInfo) {
     activityKind,
     lastToolDetail,
     firstUserPrompt,
+    promptProbes,
+    referencedUuids,
+    brainPathUuids,
   };
 
   codexCache.set(filePath, { cacheKey, data });
@@ -1108,7 +1405,6 @@ function readSummariesDb(dbPath) {
           source
         FROM conversation_summaries
         ORDER BY last_modified_time DESC
-        LIMIT 300
       `)
       .all();
 
@@ -1801,26 +2097,59 @@ export function buildTelemetrySnapshot({
   // 1. Real configured projects matching Antigravity's left sidebar 1-to-1!
   const configuredProjects = loadConfiguredProjects();
 
-  // 2. Read desktop & CLI DB metadata
+  // 2. Read desktop & CLI DB metadata (smart-merge so empty desktop rows never overwrite valid CLI workspaces!)
   const desktopDb = readSummariesDb(join(appDataDir, 'conversation_summaries.db'));
   const cliDb = readSummariesDb(join(cliAppDataDir, 'conversation_summaries.db'));
-  const summaryById = new Map([...cliDb.summaryById, ...desktopDb.summaryById]);
+  const isPlaceholderProjectId = (pid) =>
+    !pid || pid === 'default-cli-project' || pid === 'outside-of-project';
+  const summaryById = new Map(cliDb.summaryById);
+  for (const [id, d] of desktopDb.summaryById.entries()) {
+    const c = summaryById.get(id);
+    if (!c) {
+      summaryById.set(id, d);
+      continue;
+    }
+    const uriSet = new Set();
+    for (const u of [...(d.workspaceUris || []), ...(c.workspaceUris || [])]) {
+      if (u) uriSet.add(u);
+    }
+    const projectId = !isPlaceholderProjectId(d.projectId)
+      ? d.projectId
+      : !isPlaceholderProjectId(c.projectId)
+      ? c.projectId
+      : d.projectId || c.projectId || '';
+    summaryById.set(id, {
+      ...c,
+      ...d,
+      explicitTitle: d.explicitTitle || c.explicitTitle || '',
+      title: d.title || c.title || '',
+      workspaceUris: [...uriSet],
+      projectId,
+      stepCount: Math.max(Number(d.stepCount || 0), Number(c.stepCount || 0)),
+      isRunning: Boolean((d.isRunning && !d.killed) || (c.isRunning && !c.killed)),
+      killed: Boolean(d.killed && c.killed),
+      lastModifiedMs: Math.max(Number(d.lastModifiedMs || 0), Number(c.lastModifiedMs || 0)),
+      parentId: d.parentId || c.parentId || '',
+      nestingDepth: Math.max(Number(d.nestingDepth || 0), Number(c.nestingDepth || 0)),
+      source: d.source || c.source || '',
+    });
+  }
   const parentOfChild = new Map([...cliDb.parentOfChild, ...desktopDb.parentOfChild]);
 
-  // Helper: map any conversation or CLI session to one of the real configured Projects
+  // Helper: map any conversation or CLI session to one of the real configured Projects (multi-hop parent walk)
   function resolveProjectForConv(cid, extraPaths = []) {
-    const s = summaryById.get(cid);
-    const paths = [...(s?.workspaceUris || []), ...extraPaths];
-    const direct = matchProjectByPathOrId(configuredProjects, { projectId: s?.projectId || '', paths });
-    if (direct) return direct;
-    const pid = parentOfChild.get(cid);
-    if (pid) {
-      const ps = summaryById.get(pid);
-      const fromParent = matchProjectByPathOrId(configuredProjects, {
-        projectId: ps?.projectId || '',
-        paths: ps?.workspaceUris || [],
+    let cur = cid;
+    const visited = new Set();
+    for (let depth = 0; depth < 8 && cur && !visited.has(cur); depth += 1) {
+      visited.add(cur);
+      const s = summaryById.get(cur);
+      const paths = depth === 0 ? [...(s?.workspaceUris || []), ...extraPaths] : s?.workspaceUris || [];
+      const matched = matchProjectByPathOrId(configuredProjects, {
+        projectId: isPlaceholderProjectId(s?.projectId) ? '' : s?.projectId || '',
+        paths,
       });
-      if (fromParent) return fromParent;
+      if (matched) return matched;
+      cur = parentOfChild.get(cur) || s?.parentId || '';
     }
     return null;
   }
@@ -1845,6 +2174,7 @@ export function buildTelemetrySnapshot({
     });
   }
   topConversations.sort((a, b) => b.lastModifiedMs - a.lastModifiedMs);
+  const topConversationIdSet = new Set(topConversations.map((c) => c.id));
 
   // Resolve active project & active conversation cleanly
   let activeConvId = conversationId;
@@ -1894,7 +2224,7 @@ export function buildTelemetrySnapshot({
   if (existsSync(desktopBrainDir)) {
     for (const id of readdirSync(desktopBrainDir)) {
       if (!/^[0-9a-f-]{8,}$/i.test(id)) continue;
-      const parsed = parseAgyTranscript(resolveTranscriptFile(desktopBrainDir, id));
+      const parsed = parseAgyTranscript(resolveTranscriptFile(desktopBrainDir, id), id);
       if (parsed) parsedDesktop.set(id, parsed);
     }
   }
@@ -1903,14 +2233,23 @@ export function buildTelemetrySnapshot({
   if (existsSync(cliBrainDir)) {
     for (const id of readdirSync(cliBrainDir)) {
       if (!/^[0-9a-f-]{8,}$/i.test(id)) continue;
-      const parsed = parseAgyTranscript(resolveTranscriptFile(cliBrainDir, id));
+      const parsed = parseAgyTranscript(resolveTranscriptFile(cliBrainDir, id), id);
       if (parsed) parsedAgyCli.set(id, parsed);
     }
   }
 
-  // Parse recent Codex CLI sessions belonging to configured projects (fast-filter CWD from 32KB header first)
+  // Parse Codex CLI sessions belonging to configured projects (no 40-file cap; fast-filter CWD from 32KB header first)
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const codexMaxAgeMs =
+    range === 'all'
+      ? 0
+      : range === '30d'
+      ? 35 * DAY_MS
+      : range === '7d'
+      ? 14 * DAY_MS
+      : 7 * DAY_MS;
   const codexSessions = [];
-  for (const f of listRecentCodexFiles(30 * 24 * 60 * 60 * 1000)) {
+  for (const f of listRecentCodexFiles(codexMaxAgeMs, 2000)) {
     const headerCwd = readCodexHeaderCwd(f.path);
     if (headerCwd && !matchProjectByPathOrId(configuredProjects, { paths: [headerCwd] })) {
       continue;
@@ -1926,7 +2265,6 @@ export function buildTelemetrySnapshot({
   // Active conversation metadata
   const activeSummary = summaryById.get(activeConvId);
   const activeData = parsedDesktop.get(activeConvId) || parsedAgyCli.get(activeConvId) || null;
-  const activeTurns = activeData?.turns || [];
   const activeConvObj = {
     id: activeConvId,
     title: activeSummary?.title || (activeConvId ? '当前会话' : '暂无会话'),
@@ -1940,6 +2278,10 @@ export function buildTelemetrySnapshot({
   // ==================== UNIFIED PROJECT & SESSION STATS ====================
   const cutoffRangeMs = getRangeCutoffMs(range);
   const filterByRange = (turns) => turns.filter((t) => !(cutoffRangeMs > 0 && t.ts > 0 && t.ts < cutoffRangeMs));
+  const filterBySource = (entries) => {
+    if (!sourceFilter || sourceFilter === 'all') return entries;
+    return entries.filter((e) => e.sourceKind === sourceFilter);
+  };
 
   // Subagent descriptors for parent->project linking
   const parentIds = new Set(topConversations.map((c) => c.id));
@@ -1949,10 +2291,224 @@ export function buildTelemetrySnapshot({
     if (!parentOfChild.has(cid)) parentOfChild.set(cid, desc.parentId);
   }
 
-  // Session stats (strictly current GUI conversation within chosen time range)
-  const sessionStats = summarizeModelEntries(
-    filterByRange(activeTurns).map((t) => ({ ...t, sourceKind: 'gui' })),
-  );
+  // Session stats: aggregate current conversation + ALL transitively dispatched workers
+  // (native GUI subagents, AGY CLI sessions, and Codex CLI sessions + nested Codex subagents).
+  const sessionRawEntries = [];
+  let sessionSubagentCount = 0;
+  let sessionAgyCliCount = 0;
+  let sessionCodexCliCount = 0;
+
+  if (activeConvId && activeData) {
+    const rootProjId = activeProject?.id || resolveProjectForConv(activeConvId)?.id || '';
+    const rootFirstMs = activeData.firstStepAt || activeData.turns?.[0]?.ts || 0;
+    const rootLastMs = Math.max(activeData.lastStepAt || 0, activeData.mtimeMs || 0);
+    const rootIsRecentOrLive = Boolean(
+      activeSummary?.isRunning || !activeData.isTurnFinished || (rootLastMs > 0 && nowMs - rootLastMs <= 30 * 60_000),
+    );
+    const rootEndBoundMs = rootIsRecentOrLive ? 0 : rootLastMs + 25 * 60_000;
+    const isTurnWithinRootWindow = (t) => {
+      if (!t.ts || t.ts <= 0) return true;
+      if (rootFirstMs > 0 && t.ts < rootFirstMs - 60_000) return false;
+      if (rootEndBoundMs > 0 && t.ts > rootEndBoundMs) return false;
+      return true;
+    };
+    const matchesPromptInBlob = (probes, blob) =>
+      Boolean(probes && probes.length > 0 && blob && probes.every((p) => blob.includes(p)));
+
+    // Build reverse indices for fast BFS traversal
+    const childrenByParent = new Map();
+    for (const [childId, parentId] of parentOfChild.entries()) {
+      if (!parentId) continue;
+      let list = childrenByParent.get(parentId);
+      if (!list) {
+        list = [];
+        childrenByParent.set(parentId, list);
+      }
+      list.push(childId);
+    }
+
+    const codexChildrenByParentTid = new Map();
+    const projectCodexList = [];
+    for (const cs of codexSessions) {
+      if (rootProjId && cs.projectId !== rootProjId) continue;
+      projectCodexList.push(cs);
+      if (cs.parentThreadId) {
+        let list = codexChildrenByParentTid.get(cs.parentThreadId);
+        if (!list) {
+          list = [];
+          codexChildrenByParentTid.set(cs.parentThreadId, list);
+        }
+        list.push(cs);
+      }
+    }
+
+    const projectAgyCliList = [];
+    for (const [cid, parsed] of parsedAgyCli.entries()) {
+      const proj = resolveProjectForConv(cid);
+      if (rootProjId && proj && proj.id !== rootProjId) continue;
+      projectAgyCliList.push([cid, parsed]);
+    }
+
+    const attachedGuiIds = new Set();
+    const attachedAgyCliIds = new Set();
+    const attachedCodexIds = new Set();
+    const queue = [];
+
+    const enqueueAgyNode = (kind, id, parsed, brainDir) => {
+      const idLower = String(id).toLowerCase();
+      if (kind === 'gui') {
+        if (attachedGuiIds.has(id)) return;
+        attachedGuiIds.add(id);
+      } else {
+        if (attachedAgyCliIds.has(id)) return;
+        attachedAgyCliIds.add(id);
+      }
+      const scratchSig = readConversationScratchSignals(join(brainDir, id), id);
+      const uuids = new Set(parsed.referencedUuids || []);
+      for (const u of scratchSig.uuids) uuids.add(u);
+      const dispatchBlob =
+        parsed.cliDispatchBlob && scratchSig.dispatchNorm
+          ? `${parsed.cliDispatchBlob}\n${scratchSig.dispatchNorm}`
+          : parsed.cliDispatchBlob || scratchSig.dispatchNorm || '';
+      const firstMs = parsed.firstStepAt || parsed.turns?.[0]?.ts || parsed.mtimeMs || 0;
+      const lastMs = Math.max(parsed.lastStepAt || 0, parsed.mtimeMs || 0);
+      queue.push({ kind, id, idLower, parsed, firstMs, lastMs, uuids, dispatchBlob });
+    };
+
+    const enqueueCodexNode = (cs) => {
+      if (attachedCodexIds.has(cs.idLower)) return;
+      attachedCodexIds.add(cs.idLower);
+      queue.push({
+        kind: 'codex-cli',
+        id: cs.id,
+        idLower: cs.idLower,
+        cs,
+        firstMs: cs.firstEventTs || cs.turns?.[0]?.ts || cs.mtimeMs || 0,
+        lastMs: cs.lastActiveMs || cs.mtimeMs || 0,
+        uuids: cs.referencedUuids || new Set(),
+        dispatchBlob: '',
+      });
+    };
+
+    if (parsedDesktop.has(activeConvId)) {
+      enqueueAgyNode('gui', activeConvId, activeData, desktopBrainDir);
+    } else if (parsedAgyCli.has(activeConvId)) {
+      enqueueAgyNode('agy-cli', activeConvId, activeData, cliBrainDir);
+    }
+
+    while (queue.length > 0) {
+      const cur = queue.shift();
+
+      // 1. Native GUI subagents & DB-linked children
+      if (cur.kind === 'gui' || cur.kind === 'agy-cli') {
+        for (const childId of childrenByParent.get(cur.id) || []) {
+          if (childId === activeConvId || topConversationIdSet.has(childId)) continue;
+          if (parsedAgyCli.has(childId)) {
+            enqueueAgyNode('agy-cli', childId, parsedAgyCli.get(childId), cliBrainDir);
+          } else if (parsedDesktop.has(childId)) {
+            enqueueAgyNode('gui', childId, parsedDesktop.get(childId), desktopBrainDir);
+          }
+        }
+      }
+
+      // 2. Native Codex subagents (parent_thread_id / thread_spawn)
+      if (cur.kind === 'codex-cli') {
+        for (const subCs of codexChildrenByParentTid.get(cur.idLower) || []) {
+          enqueueCodexNode(subCs);
+        }
+      }
+
+      // 3. Dispatched AGY CLI workers (by exact UUID reference, reverse parent reference, or prompt fingerprint)
+      for (const [cid, parsed] of projectAgyCliList) {
+        if (attachedAgyCliIds.has(cid)) continue;
+        const cidLower = cid.toLowerCase();
+        const cFirst = parsed.firstStepAt || parsed.turns?.[0]?.ts || parsed.mtimeMs || 0;
+        const cLast = Math.max(parsed.lastStepAt || 0, parsed.mtimeMs || 0);
+        if (rootFirstMs > 0 && cLast > 0 && cLast < rootFirstMs - 60_000) continue;
+        if (rootEndBoundMs > 0 && cFirst > 0 && cFirst > rootEndBoundMs) continue;
+
+        const linkedByUuid =
+          cur.uuids.has(cidLower) ||
+          (cur.kind === 'gui' && Boolean(parsed.brainPathUuids?.has(cur.idLower)));
+        const linkedByPrompt =
+          !linkedByUuid &&
+          Boolean(cur.dispatchBlob) &&
+          parsed.promptProbes?.length > 0 &&
+          cFirst >= cur.firstMs - 120_000 &&
+          cFirst <= cur.lastMs + 10 * 60_000 &&
+          matchesPromptInBlob(parsed.promptProbes, cur.dispatchBlob);
+
+        if (linkedByUuid || linkedByPrompt) {
+          enqueueAgyNode('agy-cli', cid, parsed, cliBrainDir);
+        }
+      }
+
+      // 4. Dispatched Codex CLI workers & nested codex exec children
+      for (const cs of projectCodexList) {
+        if (attachedCodexIds.has(cs.idLower)) continue;
+        const cFirst = cs.firstEventTs || cs.turns?.[0]?.ts || cs.mtimeMs || 0;
+        const cLast = cs.lastActiveMs || cs.mtimeMs || 0;
+        if (rootFirstMs > 0 && cLast > 0 && cLast < rootFirstMs - 60_000) continue;
+        if (rootEndBoundMs > 0 && cFirst > 0 && cFirst > rootEndBoundMs) continue;
+
+        const linkedByUuid =
+          cur.uuids.has(cs.idLower) ||
+          (cur.kind === 'gui' && Boolean(cs.brainPathUuids?.has(cur.idLower)));
+        const linkedByPrompt =
+          !linkedByUuid &&
+          Boolean(cur.dispatchBlob) &&
+          cs.promptProbes?.length > 0 &&
+          cFirst >= cur.firstMs - 120_000 &&
+          cFirst <= cur.lastMs + 10 * 60_000 &&
+          matchesPromptInBlob(cs.promptProbes, cur.dispatchBlob);
+
+        if (linkedByUuid || linkedByPrompt) {
+          enqueueCodexNode(cs);
+        }
+      }
+    }
+
+    // Collect turns from all attached nodes within range (trimming any turns outside root session span on resumed worker threads)
+    for (const gid of attachedGuiIds) {
+      const parsed = parsedDesktop.get(gid);
+      if (!parsed) continue;
+      const isRoot = gid === activeConvId;
+      const ranged = filterByRange(isRoot ? parsed.turns : parsed.turns.filter(isTurnWithinRootWindow));
+      if (ranged.length) {
+        if (!isRoot) sessionSubagentCount += 1;
+        sessionRawEntries.push(...ranged.map((t) => ({ ...t, sourceKind: 'gui' })));
+      }
+    }
+    for (const cid of attachedAgyCliIds) {
+      const parsed = parsedAgyCli.get(cid);
+      if (!parsed) continue;
+      const isRoot = cid === activeConvId;
+      const ranged = filterByRange(isRoot ? parsed.turns : parsed.turns.filter(isTurnWithinRootWindow));
+      if (ranged.length) {
+        if (!isRoot) sessionAgyCliCount += 1;
+        sessionRawEntries.push(...ranged.map((t) => ({ ...t, sourceKind: 'agy-cli' })));
+      }
+    }
+    for (const cs of projectCodexList) {
+      if (!attachedCodexIds.has(cs.idLower)) continue;
+      const ranged = filterByRange((cs.turns || []).filter(isTurnWithinRootWindow));
+      if (ranged.length) {
+        sessionCodexCliCount += 1;
+        sessionRawEntries.push(...ranged.map((t) => ({ ...t, sourceKind: 'codex-cli' })));
+      }
+    }
+  }
+
+  const sessionAllStats = summarizeModelEntries(sessionRawEntries);
+  const sessionFilteredStats =
+    sourceFilter === 'all' ? sessionAllStats : summarizeModelEntries(filterBySource(sessionRawEntries));
+  const sessionStats = {
+    ...sessionFilteredStats,
+    allBySource: sessionAllStats.bySource,
+    subagentCount: sessionSubagentCount,
+    agyCliCount: sessionAgyCliCount,
+    codexCliCount: sessionCodexCliCount,
+  };
 
   // Project stats map (ONLY configured sidebar Projects! Strictly tags gui vs agy-cli vs codex-cli!)
   const projectStatsMap = new Map();
@@ -1972,6 +2528,7 @@ export function buildTelemetrySnapshot({
   const agyClaudeTurns = [];
 
   for (const [cid, parsed] of parsedDesktop.entries()) {
+    if (parsedAgyCli.has(cid)) continue;
     for (const t of parsed.turns) {
       const fam = classifyAgyQuotaFamily(t.model);
       if (fam === 'gemini') agyGeminiTurns.push({ ...t, sourceKind: 'gui' });
@@ -2012,11 +2569,6 @@ export function buildTelemetrySnapshot({
     bucket.codexCliCount += 1;
     bucket.entries.push(...ranged.map((t) => ({ ...t, sourceKind: 'codex-cli' })));
   }
-
-  const filterBySource = (entries) => {
-    if (!sourceFilter || sourceFilter === 'all') return entries;
-    return entries.filter((e) => e.sourceKind === sourceFilter);
-  };
 
   const projectSummaries = configuredProjects.map((proj) => {
     const bkt = projectStatsMap.get(proj.id);

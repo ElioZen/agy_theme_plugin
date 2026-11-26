@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_VERSION = '3.9.1';
+  const FRONTEND_VERSION = '3.9.2';
   const FALLBACK_GLASS_PRESETS = [
     {
       id: 'frosted-dark',
@@ -854,13 +854,27 @@
     });
 
     const isSessionScope = scope === 'session';
-    $('#stats-source-row').style.display = isSessionScope ? 'none' : 'flex';
+    $('#stats-source-row').style.display = 'flex';
 
-    if (!isSessionScope) {
-      const split = dataBlock.allBySource || dataBlock.bySource || { gui: 0, agyCli: 0, codexCli: 0 };
-      $('#src-gui').textContent = formatCompact(split.gui);
-      $('#src-agycli').textContent = formatCompact(split.agyCli);
-      $('#src-codex').textContent = formatCompact(split.codexCli);
+    const split = dataBlock.allBySource || dataBlock.bySource || { gui: 0, agyCli: 0, codexCli: 0 };
+    $('#src-gui').textContent = formatCompact(split.gui);
+    $('#src-agycli').textContent = formatCompact(split.agyCli);
+    $('#src-codex').textContent = formatCompact(split.codexCli);
+    const splitStrip = $('#source-split-strip');
+    if (splitStrip) {
+      if (isSessionScope) {
+        const subN = Number(dataBlock.subagentCount || 0);
+        const agyN = Number(dataBlock.agyCliCount || 0);
+        const codexN = Number(dataBlock.codexCliCount || 0);
+        splitStrip.title = `当前会话来源拆分（含该会话调度的 ${subN} 个 GUI 子智能体、${agyN} 个 AGY CLI 与 ${codexN} 个 Codex CLI）`;
+      } else if (scope === 'project') {
+        const sessN = Number(dataBlock.sessionCount || 0);
+        const agyN = Number(dataBlock.agyCliCount || 0);
+        const codexN = Number(dataBlock.codexCliCount || 0);
+        splitStrip.title = `当前项目来源拆分（${sessN} 个主会话、${agyN} 个 AGY CLI 与 ${codexN} 个 Codex CLI）`;
+      } else {
+        splitStrip.title = '全部项目来源拆分（AGY GUI / AGY CLI / Codex CLI）';
+      }
     }
 
     $('#stats-total-tokens').textContent = formatNumber(dataBlock.totalTokens);

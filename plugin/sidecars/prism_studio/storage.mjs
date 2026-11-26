@@ -148,7 +148,7 @@ export const GLASS_PRESETS = [
 ];
 
 const SCHEMA_VERSION = 4;
-export const ASSET_VERSION = '3.9.1';
+export const ASSET_VERSION = '3.9.2';
 
 export const DEFAULT_SETTINGS = {
   schemaVersion: SCHEMA_VERSION,
