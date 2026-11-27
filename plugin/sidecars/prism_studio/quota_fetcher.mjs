@@ -13,22 +13,90 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
+import { IS_WIN, IS_WSL, getWindowsUserProfileInWsl, toWindowsPath } from './platform.mjs';
+
+function buildCliPathEnv() {
+  const extra = [];
+  if (IS_WIN) {
+    const localAppData = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local');
+    const appData = process.env.APPDATA || join(homedir(), 'AppData', 'Roaming');
+    extra.push(
+      join(localAppData, 'agy', 'bin'),
+      join(homedir(), '.local', 'bin'),
+      join(appData, 'npm'),
+    );
+  } else {
+    extra.push(
+      join(homedir(), '.local', 'bin'),
+      join(homedir(), '.npm-global', 'bin'),
+      '/opt/homebrew/bin',
+      '/usr/local/bin',
+    );
+  }
+  const cur = process.env.PATH || '';
+  return [...extra, cur].filter(Boolean).join(delimiter);
+}
 
 function findAgyBinary() {
-  const candidates = [
+  if (IS_WIN) {
+    const localAppData = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local');
+    const appData = process.env.APPDATA || join(homedir(), 'AppData', 'Roaming');
+    const candidates = [
+      join(localAppData, 'agy', 'bin', 'agy.exe'),
+      join(homedir(), '.local', 'bin', 'agy.exe'),
+      join(appData, 'npm', 'agy.cmd'),
+    ];
+    for (const p of candidates) {
+      if (existsSync(p)) return { bin: p, found: true, isWinExe: true };
+    }
+    return { bin: 'agy', found: false, isWinExe: true };
+  }
+
+  const posixCandidates = [
     join(homedir(), '.local', 'bin', 'agy'),
     '/opt/homebrew/bin/agy',
     '/usr/local/bin/agy',
+    join(homedir(), '.npm-global', 'bin', 'agy'),
   ];
-  for (const p of candidates) {
-    if (existsSync(p)) return p;
+  for (const p of posixCandidates) {
+    if (existsSync(p)) return { bin: p, found: true, isWinExe: false };
   }
-  return 'agy';
+
+  if (IS_WSL) {
+    const winProfile = getWindowsUserProfileInWsl();
+    if (winProfile) {
+      const winCandidates = [
+        join(winProfile, 'AppData', 'Local', 'agy', 'bin', 'agy.exe'),
+        join(winProfile, '.local', 'bin', 'agy.exe'),
+      ];
+      for (const p of winCandidates) {
+        if (existsSync(p)) return { bin: p, found: true, isWinExe: true };
+      }
+    }
+  }
+
+  return { bin: 'agy', found: false, isWinExe: false };
 }
 
 function findCodexBinary() {
+  if (IS_WIN) {
+    const localAppData = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local');
+    const appData = process.env.APPDATA || join(homedir(), 'AppData', 'Roaming');
+    const candidates = [
+      join(appData, 'npm', 'codex.cmd'),
+      join(localAppData, 'Programs', 'codex', 'codex.exe'),
+      join(homedir(), '.local', 'bin', 'codex.exe'),
+    ];
+    for (const p of candidates) {
+      if (existsSync(p)) {
+        return { bin: p, useShell: /\.(cmd|bat)$/i.test(p), useWslCmd: false };
+      }
+    }
+    return { bin: 'codex', useShell: true, useWslCmd: false };
+  }
+
   const candidates = [
     '/opt/homebrew/bin/codex',
     '/usr/local/bin/codex',
@@ -36,9 +104,20 @@ function findCodexBinary() {
     join(homedir(), '.npm-global', 'bin', 'codex'),
   ];
   for (const p of candidates) {
-    if (existsSync(p)) return p;
+    if (existsSync(p)) return { bin: p, useShell: false, useWslCmd: false };
   }
-  return 'codex';
+
+  if (IS_WSL) {
+    const winProfile = getWindowsUserProfileInWsl();
+    if (winProfile) {
+      const winCodex = join(winProfile, 'AppData', 'Roaming', 'npm', 'codex.cmd');
+      if (existsSync(winCodex)) {
+        return { bin: winCodex, useShell: false, useWslCmd: true };
+      }
+    }
+  }
+
+  return { bin: 'codex', useShell: false, useWslCmd: false };
 }
 
 const PYTHON_PTY_RUNNER = `
@@ -317,10 +396,19 @@ function listRecentCodexSessionFiles(limit = 220, maxAgeMs = 21 * DAY_MS, force 
   if (!force && nowMs - codexSessionDirCache.fetchedAtMs < 10_000 && codexSessionDirCache.files.length > 0) {
     return codexSessionDirCache.files.slice(0, limit);
   }
-  const root = join(homedir(), '.codex', 'sessions');
-  if (!existsSync(root)) return [];
+  const roots = [join(homedir(), '.codex', 'sessions')];
+  if (IS_WSL) {
+    const winProfile = getWindowsUserProfileInWsl();
+    if (winProfile) {
+      const winSessions = join(winProfile, '.codex', 'sessions');
+      if (!roots.includes(winSessions)) roots.push(winSessions);
+    }
+  }
+  const existingRoots = roots.filter((r) => existsSync(r));
+  if (existingRoots.length === 0) return [];
   const cutoff = nowMs - maxAgeMs;
   const out = [];
+  const seen = new Set();
 
   function walk(dir, depth) {
     if (depth > 4) return;
@@ -334,7 +422,8 @@ function listRecentCodexSessionFiles(limit = 220, maxAgeMs = 21 * DAY_MS, force 
       const full = join(dir, ent.name);
       if (ent.isDirectory()) {
         walk(full, depth + 1);
-      } else if (ent.isFile() && ent.name.endsWith('.jsonl')) {
+      } else if (ent.isFile() && ent.name.endsWith('.jsonl') && !seen.has(full)) {
+        seen.add(full);
         try {
           const st = statSync(full);
           if (st.mtimeMs >= cutoff) {
@@ -347,7 +436,7 @@ function listRecentCodexSessionFiles(limit = 220, maxAgeMs = 21 * DAY_MS, force 
     }
   }
 
-  walk(root, 0);
+  for (const root of existingRoots) walk(root, 0);
   out.sort((a, b) => b.mtimeMs - a.mtimeMs);
   codexSessionDirCache = { fetchedAtMs: nowMs, files: out };
   return out.slice(0, limit);
@@ -1507,22 +1596,56 @@ export class AgyQuotaFetcher {
     };
 
     try {
-      const script = `#!/usr/bin/env bash\ncat > "${probeOut}.tmp" && mv "${probeOut}.tmp" "${probeOut}"\necho "ok"\n`;
-      writeFileSync(probeSh, script, 'utf-8');
-      chmodSync(probeSh, 0o755);
+      const agy = findAgyBinary();
+      const useNodeCapture = IS_WIN || agy.isWinExe;
+      let statusCmd = probeSh;
+      if (useNodeCapture) {
+        const probeMjs = join(this.#storage.dataDir, `model_ctx_probe_${process.pid}.mjs`);
+        const outTarget = IS_WSL ? toWindowsPath(probeOut) : probeOut;
+        const mjsSrc = `import { readFileSync, renameSync, writeFileSync } from 'node:fs';\nconst out = ${JSON.stringify(outTarget)};\nconst data = readFileSync(0, 'utf-8');\nwriteFileSync(out + '.tmp', data, 'utf-8');\nrenameSync(out + '.tmp', out);\nconsole.log('ok');\n`;
+        writeFileSync(probeMjs, mjsSrc, 'utf-8');
+        const scriptRef = IS_WSL ? toWindowsPath(probeMjs) : probeMjs;
+        statusCmd = `"${IS_WIN ? process.execPath : 'node'}" "${scriptRef}"`;
+      } else {
+        const script = `#!/usr/bin/env bash\ncat > "${probeOut}.tmp" && mv "${probeOut}.tmp" "${probeOut}"\necho "ok"\n`;
+        writeFileSync(probeSh, script, 'utf-8');
+        chmodSync(probeSh, 0o755);
+      }
 
-      const agyBin = findAgyBinary();
       const settingsJson = JSON.stringify({
-        statusLine: { type: 'command', command: probeSh, enabled: true },
+        statusLine: { type: 'command', command: statusCmd, enabled: true },
       });
 
-      const child = spawn('python3', ['-c', PYTHON_MODEL_PROBE_RUNNER, agyBin, probeArg, settingsJson, probeOut], {
-        stdio: ['ignore', 'ignore', 'ignore'],
-        env: {
-          ...process.env,
-          PATH: `${join(homedir(), '.local', 'bin')}:/opt/homebrew/bin:/usr/local/bin:${process.env.PATH || ''}`,
-        },
-      });
+      const env = { ...process.env, PATH: buildCliPathEnv() };
+      let child;
+      let pollTimer = null;
+
+      if (IS_WIN) {
+        child = spawn(agy.bin, ['--project', 'default-cli-project', '--model', probeArg, '--settings', settingsJson], {
+          stdio: ['pipe', 'ignore', 'ignore'],
+          env,
+          shell: /\.(cmd|bat)$/i.test(agy.bin),
+          windowsHide: true,
+        });
+        pollTimer = setInterval(() => {
+          try {
+            if (existsSync(probeOut)) {
+              const data = JSON.parse(readFileSync(probeOut, 'utf-8'));
+              if (data?.context_window?.context_window_size) {
+                try { child.stdin?.write('\x04\x04'); child.stdin?.end(); } catch {}
+                try { child.kill(); } catch {}
+              }
+            }
+          } catch {
+            // ignore
+          }
+        }, 180);
+      } else {
+        child = spawn('python3', ['-c', PYTHON_MODEL_PROBE_RUNNER, agy.bin, probeArg, settingsJson, probeOut], {
+          stdio: ['ignore', 'ignore', 'ignore'],
+          env,
+        });
+      }
 
       const hardKill = setTimeout(() => {
         try {
@@ -1532,8 +1655,15 @@ export class AgyQuotaFetcher {
         }
       }, 11000);
 
-      child.on('exit', () => {
+      const onDone = () => {
         clearTimeout(hardKill);
+        if (pollTimer) clearInterval(pollTimer);
+        try {
+          const probeMjs = join(this.#storage.dataDir, `model_ctx_probe_${process.pid}.mjs`);
+          if (existsSync(probeMjs)) unlinkSync(probeMjs);
+        } catch {
+          // ignore
+        }
         try {
           if (existsSync(probeOut)) {
             const raw = JSON.parse(readFileSync(probeOut, 'utf-8'));
@@ -1546,7 +1676,10 @@ export class AgyQuotaFetcher {
           // ignore
         }
         finish();
-      });
+      };
+
+      child.on('error', onDone);
+      child.on('exit', onDone);
     } catch {
       finish();
     }
@@ -1596,10 +1729,19 @@ export class AgyQuotaFetcher {
     if (changed) this.#saveHistory();
   }
 
-  #ensureCaptureScript() {
+  #ensureCaptureScript(useNodeCapture = false) {
+    if (useNodeCapture) {
+      const mjsPath = join(this.#storage.dataDir, 'quota_capture.mjs');
+      const outTarget = IS_WSL ? toWindowsPath(this.#livePayloadPath) : this.#livePayloadPath;
+      const mjsSrc = `import { readFileSync, renameSync, writeFileSync } from 'node:fs';\nconst out = ${JSON.stringify(outTarget)};\nconst data = readFileSync(0, 'utf-8');\nwriteFileSync(out + '.tmp', data, 'utf-8');\nrenameSync(out + '.tmp', out);\nconsole.log('ok');\n`;
+      writeFileSync(mjsPath, mjsSrc, 'utf-8');
+      const scriptRef = IS_WSL ? toWindowsPath(mjsPath) : mjsPath;
+      return `"${IS_WIN ? process.execPath : 'node'}" "${scriptRef}"`;
+    }
     const script = `#!/usr/bin/env bash\ncat > "${this.#livePayloadPath}.tmp" && mv "${this.#livePayloadPath}.tmp" "${this.#livePayloadPath}"\necho "ok"\n`;
     writeFileSync(this.#captureScriptPath, script, 'utf-8');
     chmodSync(this.#captureScriptPath, 0o755);
+    return this.#captureScriptPath;
   }
 
   startAutoRefresh(intervalMs = 3 * 60 * 1000) {
@@ -1658,14 +1800,22 @@ export class AgyQuotaFetcher {
       };
 
       try {
-        const codexBin = findCodexBinary();
-        child = spawn(codexBin, ['app-server', '--stdio'], {
-          stdio: ['pipe', 'pipe', 'ignore'],
-          env: {
-            ...process.env,
-            PATH: `/opt/homebrew/bin:/usr/local/bin:${join(homedir(), '.local', 'bin')}:${process.env.PATH || ''}`,
-          },
-        });
+        const codex = findCodexBinary();
+        const env = { ...process.env, PATH: buildCliPathEnv() };
+        if (codex.useWslCmd) {
+          child = spawn('/mnt/c/Windows/System32/cmd.exe', ['/c', toWindowsPath(codex.bin), 'app-server', '--stdio'], {
+            stdio: ['pipe', 'pipe', 'ignore'],
+            env,
+            windowsHide: true,
+          });
+        } else {
+          child = spawn(codex.bin, ['app-server', '--stdio'], {
+            stdio: ['pipe', 'pipe', 'ignore'],
+            env,
+            shell: codex.useShell,
+            windowsHide: true,
+          });
+        }
 
         hardKill = setTimeout(finish, 9000);
         let stdoutBuf = '';
@@ -1744,25 +1894,58 @@ export class AgyQuotaFetcher {
   #runCapture() {
     return new Promise((resolve) => {
       try {
-        this.#ensureCaptureScript();
-        const agyBin = findAgyBinary();
+        const agy = findAgyBinary();
+        const statusCmd = this.#ensureCaptureScript(IS_WIN || agy.isWinExe);
         const settingsJson = JSON.stringify({
           statusLine: {
             type: 'command',
-            command: this.#captureScriptPath,
+            command: statusCmd,
             enabled: true,
           },
         });
 
-        const child = spawn('python3', ['-c', PYTHON_PTY_RUNNER, agyBin, settingsJson, this.#livePayloadPath], {
-          stdio: ['ignore', 'ignore', 'pipe'],
-          env: {
-            ...process.env,
-            PATH: `${join(homedir(), '.local', 'bin')}:/opt/homebrew/bin:/usr/local/bin:${process.env.PATH || ''}`,
-          },
-        });
+        const env = { ...process.env, PATH: buildCliPathEnv() };
+        let child;
+        let pollTimer = null;
+
+        if (IS_WIN) {
+          try {
+            if (existsSync(this.#livePayloadPath)) unlinkSync(this.#livePayloadPath);
+          } catch {
+            // ignore
+          }
+          child = spawn(agy.bin, ['--project', 'default-cli-project', '--settings', settingsJson], {
+            stdio: ['pipe', 'ignore', 'pipe'],
+            env,
+            shell: /\.(cmd|bat)$/i.test(agy.bin),
+            windowsHide: true,
+          });
+          let capturedAt = 0;
+          pollTimer = setInterval(() => {
+            try {
+              if (existsSync(this.#livePayloadPath)) {
+                const txt = readFileSync(this.#livePayloadPath, 'utf-8');
+                if (txt.includes('"quota"') && txt.includes('"remaining_fraction"')) {
+                  if (!capturedAt) capturedAt = Date.now();
+                  else if (Date.now() - capturedAt >= 350) {
+                    try { child.stdin?.write('\x04\x04'); child.stdin?.end(); } catch {}
+                    try { child.kill(); } catch {}
+                  }
+                }
+              }
+            } catch {
+              // ignore
+            }
+          }, 200);
+        } else {
+          child = spawn('python3', ['-c', PYTHON_PTY_RUNNER, agy.bin, settingsJson, this.#livePayloadPath], {
+            stdio: ['ignore', 'ignore', 'pipe'],
+            env,
+          });
+        }
 
         let errBuf = '';
+        let settled = false;
         child.stderr?.on('data', (c) => {
           errBuf += c.toString();
         });
@@ -1775,8 +1958,11 @@ export class AgyQuotaFetcher {
           }
         }, 14000);
 
-        child.on('exit', () => {
+        const onDone = (spawnErr) => {
+          if (settled) return;
+          settled = true;
           clearTimeout(hardKill);
+          if (pollTimer) clearInterval(pollTimer);
           try {
             if (existsSync(this.#livePayloadPath)) {
               const raw = JSON.parse(readFileSync(this.#livePayloadPath, 'utf-8'));
@@ -1795,12 +1981,20 @@ export class AgyQuotaFetcher {
                 return;
               }
             }
-            this.#lastError = errBuf.trim().slice(0, 140) || '未捕获到官方额度数据';
+            const errText = (spawnErr?.message || errBuf || '').trim();
+            if (!agy.found && /ENOENT|FileNotFoundError|not found|No such file/i.test(errText)) {
+              this.#lastError = '未检测到 agy CLI（安装后可自动同步 Gemini / Claude 官方额度）';
+            } else {
+              this.#lastError = errText.slice(0, 140) || '未捕获到官方额度数据';
+            }
           } catch (err) {
             this.#lastError = err.message;
           }
           resolve(this.getSnapshot());
-        });
+        };
+
+        child.on('error', (err) => onDone(err));
+        child.on('exit', () => onDone(null));
       } catch (err) {
         this.#lastError = err.message;
         resolve(this.getSnapshot());

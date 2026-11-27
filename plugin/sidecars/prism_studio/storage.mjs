@@ -2,6 +2,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameS
 import { homedir } from 'node:os';
 import { basename, dirname, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { IS_WIN, IS_WSL, toWindowsPath } from './platform.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const PUBLIC_DIR = join(__dirname, 'public');
@@ -426,6 +427,7 @@ export class PrismStorage {
     const payload = {
       enabled: Boolean(settings.companion?.enabled),
       imagePath: wpPath,
+      winImagePath: IS_WIN || IS_WSL ? toWindowsPath(wpPath) : '',
       opacity: Math.max(0.08, Math.min(0.95, Number(settings.companion?.opacity ?? 62) / 100)),
       blur: Math.max(0, Math.min(36, Number(settings.companion?.blur ?? 0))),
       vignette: Math.max(0, Math.min(0.90, Number(settings.companion?.vignette ?? 18) / 100)),

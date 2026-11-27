@@ -2,6 +2,7 @@ import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, s
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { IS_WIN, IS_WSL, getWindowsUserProfileInWsl, windowsToWslPath } from './platform.mjs';
 import { resolveAppDataDir } from './storage.mjs';
 
 const MODEL_PRICING = [
@@ -95,11 +96,26 @@ export function estimateCostUsd(modelId, uncachedInput, cacheRead, output) {
 function normalizePathFromUri(uriOrPath) {
   const s = String(uriOrPath || '').trim();
   if (!s) return '';
+  let decoded;
   try {
-    return decodeURIComponent(s.replace(/^file:\/\//, '')).replace(/\/+$/, '');
+    decoded = decodeURIComponent(s.replace(/^file:\/\//i, ''));
   } catch {
-    return s.replace(/^file:\/\//, '').replace(/\/+$/, '');
+    decoded = s.replace(/^file:\/\//i, '');
   }
+  decoded = decoded.replace(/\\/g, '/');
+  // Normalize Windows file:///C:/... -> C:/...
+  if (/^\/[A-Za-z]:\//.test(decoded)) {
+    decoded = decoded.slice(1);
+  }
+  // In WSL2, map Windows C:/... paths to /mnt/c/... for unified project matching
+  if (IS_WSL && /^[A-Za-z]:\//.test(decoded)) {
+    const mapped = windowsToWslPath(decoded);
+    if (mapped) decoded = mapped;
+  }
+  if (IS_WIN) {
+    decoded = decoded.replace(/^([A-Z]):/, (_, d) => `${d.toLowerCase()}:`);
+  }
+  return decoded.replace(/\/+$/, '');
 }
 
 function parseTimestampMs(raw) {
@@ -962,6 +978,15 @@ function listRecentCodexFiles(maxAgeMs = 7 * 24 * 60 * 60 * 1000, maxFiles = 200
     join(homedir(), '.codex', 'sessions'),
     join(homedir(), '.codex', 'archived_sessions'),
   ];
+  if (IS_WSL) {
+    const winProfile = getWindowsUserProfileInWsl();
+    if (winProfile) {
+      roots.push(
+        join(winProfile, '.codex', 'sessions'),
+        join(winProfile, '.codex', 'archived_sessions'),
+      );
+    }
+  }
   const cutoff = maxAgeMs > 0 ? Date.now() - maxAgeMs : 0;
   const results = [];
   const seen = new Set();
@@ -1736,8 +1761,13 @@ function getRangeCutoffMs(range) {
 let codexConfigCache = { key: '', data: { modelContextWindow: 0, autoCompactLimit: 0 } };
 
 function readCodexConfigLimits() {
-  const cfgPath = join(homedir(), '.codex', 'config.toml');
-  if (!existsSync(cfgPath)) return codexConfigCache.data;
+  const candidates = [join(homedir(), '.codex', 'config.toml')];
+  if (IS_WSL) {
+    const winProfile = getWindowsUserProfileInWsl();
+    if (winProfile) candidates.push(join(winProfile, '.codex', 'config.toml'));
+  }
+  const cfgPath = candidates.find((p) => existsSync(p)) || '';
+  if (!cfgPath) return codexConfigCache.data;
   try {
     const st = statSync(cfgPath);
     const key = `${st.mtimeMs}:${st.size}`;

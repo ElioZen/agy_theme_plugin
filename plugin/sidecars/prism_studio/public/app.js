@@ -571,7 +571,7 @@
     if (noticeBar) noticeBar.hidden = !isSeamless;
 
     if (!companion?.supported) {
-      badge.textContent = '仅支持 macOS';
+      badge.textContent = '仅支持 macOS / Windows';
       toggleBtn.disabled = true;
       toggleBtn.textContent = '当前系统不支持';
     } else if (companion.status === 'compiling') {

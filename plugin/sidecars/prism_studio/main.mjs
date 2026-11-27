@@ -306,6 +306,6 @@ if (initialSettings.companion?.enabled) {
   companion.start(initialSettings).catch((err) => {
     console.error('[prism_studio] Companion auto-start failed:', err.message);
   });
-} else if (process.platform === 'darwin') {
+} else if (companion.isSupported()) {
   companion.ensureCompiled().catch(() => {});
 }
