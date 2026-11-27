@@ -608,16 +608,19 @@ function extractTaskSubjectFromPrompt(promptText) {
   if (!clean) return '';
 
   // 1. Prefer explicit markdown bold task headline within the opening 360 chars (e.g. **P0-3 正式前端 (...)**)
+  // Guard against glob patterns like `src/views/**` ... `src/other/**` and prohibition warnings (**严禁...**).
   const headSlice = clean.slice(0, 380);
-  const boldMatch = /\*\*([^*]{4,140})\*\*/.exec(headSlice);
+  const boldMatch = /(?<![/\\])\*\*([^*\n]{4,140}?)(?<![/\\])\*\*/.exec(headSlice);
   if (boldMatch) {
-    const leadMatch = /^(You are (?:implementing|building|fixing|auditing|reviewing|refactoring|testing)|请[^*]{0,20}?(?:完成|更新|修复|实现))/i.exec(
-      headSlice.trim(),
-    );
-    const verb = leadMatch ? leadMatch[1].replace(/^请[^，。]*?(?=(?:完成|更新|修复|实现))/, '') : '';
     const inner = boldMatch[1].replace(/[`]/g, '').trim();
-    const combined = verb && !inner.includes(verb) ? `${verb} ${inner}` : inner;
-    return combined;
+    if (inner && !/^(?:严禁|禁止|不要|注意|警告|切勿|DO NOT|NEVER|STRICT)/i.test(inner)) {
+      const leadMatch = /^(You are (?:implementing|building|fixing|auditing|reviewing|refactoring|testing)|请[^*]{0,20}?(?:完成|更新|修复|实现))/i.exec(
+        headSlice.trim(),
+      );
+      const verb = leadMatch ? leadMatch[1].replace(/^请[^，。]*?(?=(?:完成|更新|修复|实现))/, '') : '';
+      const combined = verb && !inner.includes(verb) ? `${verb} ${inner}` : inner;
+      return combined;
+    }
   }
 
   // 2. Strip Codex/worker boilerplate preamble sentences to find the actual task ownership sentence
@@ -730,8 +733,32 @@ function parseAgyTranscript(filePath, convId = '') {
   let currentTurnSteps = 0;
   let hasCliInvocation = false;
   const cliCmdSnippets = [];
+  const cliDispatchedUuids = new Set();
   const writtenPromptSnippets = [];
   let writtenPromptBudget = 160_000;
+  const observedPathsSet = new Set();
+  const MAX_OBSERVED_PATHS = 48;
+  const selfLower = String(convId || '').toLowerCase();
+
+  const addObservedPath = (rawVal) => {
+    if (observedPathsSet.size >= MAX_OBSERVED_PATHS || !rawVal) return;
+    const clean = unwrapArgScalar(rawVal).replace(/\\/g, '/').trim();
+    if (!clean) return;
+    if (!clean.startsWith('/') && !/^[A-Za-z]:\//.test(clean)) return;
+    if (/\/\.gemini\/antigravity(?:-cli)?\/brain\//i.test(clean)) return;
+    observedPathsSet.add(clean);
+  };
+
+  const ABS_PATH_SCAN_RE = /(?:\/(?:[^\s"'`<>|;(){}\[\],]+\/)+[^\s"'`<>|;(){}\[\],]*|[A-Za-z]:[\\/][^\s"'`<>|;(){}\[\],]+)/g;
+  const extractObservedPathsFromText = (rawText) => {
+    if (observedPathsSet.size >= MAX_OBSERVED_PATHS || !rawText) return;
+    const matches = String(rawText).match(ABS_PATH_SCAN_RE);
+    if (!matches) return;
+    for (const m of matches) {
+      if (observedPathsSet.size >= MAX_OBSERVED_PATHS) break;
+      addObservedPath(m.replace(/[.,:;!?]+$/, ''));
+    }
+  };
 
   for (const line of text.split('\n')) {
     if (!line.trim()) continue;
@@ -771,6 +798,7 @@ function parseAgyTranscript(filePath, convId = '') {
       if (!firstUserPrompt && uText.trim()) {
         firstUserPrompt = uText.slice(0, 1200);
       }
+      extractObservedPathsFromText(uText.slice(0, 4000));
       currentTurnOutput = 0;
       currentTurnSteps = 0;
     } else if (obj.type === 'PLANNER_RESPONSE') {
@@ -797,12 +825,34 @@ function parseAgyTranscript(filePath, convId = '') {
           const tcName = String(tc?.name || tc?.tool_name || '').replace(/^default_api:/, '');
           const argsObj = parseToolCallArgsObject(tc?.args ?? tc?.arguments);
           if (!argsObj) continue;
+          if (observedPathsSet.size < MAX_OBSERVED_PATHS) {
+            for (const pk of [
+              'Path',
+              'TargetFile',
+              'file_path',
+              'path',
+              'SearchPath',
+              'DirectoryPath',
+              'ScriptPath',
+              'Cwd',
+              'cwd',
+              'WorkingDirectory',
+            ]) {
+              if (argsObj[pk]) addObservedPath(argsObj[pk]);
+            }
+          }
           if (tcName === 'run_command' || tcName === 'exec_command' || tcName === 'shell_command') {
             const cmdRaw = unwrapArgScalar(argsObj.CommandLine || argsObj.cmd || argsObj.command || '');
-            if (cmdRaw && /\b(?:agy|codex)\b/i.test(cmdRaw)) {
-              hasCliInvocation = true;
-              const normCmd = normalizePromptMatchText(cmdRaw.slice(0, 2400));
-              if (normCmd) cliCmdSnippets.push(normCmd);
+            if (cmdRaw) {
+              extractObservedPathsFromText(cmdRaw.slice(0, 2400));
+              if (/\b(?:agy|codex)\b/i.test(cmdRaw)) {
+                hasCliInvocation = true;
+                for (const u of extractStrongCliUuids(cmdRaw, selfLower)) {
+                  cliDispatchedUuids.add(u);
+                }
+                const normCmd = normalizePromptMatchText(cmdRaw.slice(0, 2400));
+                if (normCmd) cliCmdSnippets.push(normCmd);
+              }
             }
           } else if (tcName === 'write_file' && writtenPromptBudget > 0) {
             const pth = unwrapArgScalar(argsObj.Path || argsObj.TargetFile || argsObj.path || '');
@@ -951,7 +1001,9 @@ function parseAgyTranscript(filePath, convId = '') {
     firstUserPrompt,
     promptProbes,
     referencedUuids,
+    cliDispatchedUuids,
     brainPathUuids,
+    observedPaths: [...observedPathsSet],
     hasCliInvocation,
     cliDispatchBlob,
     isTurnFinished,
@@ -2166,8 +2218,14 @@ export function buildTelemetrySnapshot({
   }
   const parentOfChild = new Map([...cliDb.parentOfChild, ...desktopDb.parentOfChild]);
 
-  // Helper: map any conversation or CLI session to one of the real configured Projects (multi-hop parent walk)
-  function resolveProjectForConv(cid, extraPaths = []) {
+  // Helper: map any conversation or CLI session to one of the real configured Projects (multi-hop parent walk
+  // plus transcript-path / parent-dispatch fallbacks when headless CLI DB rows omit workspace_uris & project_id).
+  let parsedDesktopRef = null;
+  let parsedAgyCliRef = null;
+  const inferredParentByChildLower = new Map();
+  const resolvedProjectMemo = new Map();
+
+  function resolveProjectFromDb(cid, extraPaths = []) {
     let cur = cid;
     const visited = new Set();
     for (let depth = 0; depth < 8 && cur && !visited.has(cur); depth += 1) {
@@ -2182,6 +2240,30 @@ export function buildTelemetrySnapshot({
       cur = parentOfChild.get(cur) || s?.parentId || '';
     }
     return null;
+  }
+
+  function resolveProjectForConv(cid, extraPaths = []) {
+    const canMemo = extraPaths.length === 0 && Boolean(parsedDesktopRef);
+    if (canMemo && resolvedProjectMemo.has(cid)) {
+      return resolvedProjectMemo.get(cid);
+    }
+
+    let matched = resolveProjectFromDb(cid, extraPaths);
+    if (!matched && parsedDesktopRef) {
+      const parsed = parsedAgyCliRef?.get(cid) || parsedDesktopRef.get(cid);
+      if (parsed?.observedPaths?.length) {
+        matched = matchProjectByPathOrId(configuredProjects, { paths: parsed.observedPaths });
+      }
+      if (!matched) {
+        const inferredParent = inferredParentByChildLower.get(String(cid || '').toLowerCase());
+        if (inferredParent && inferredParent !== cid) {
+          matched = resolveProjectFromDb(inferredParent);
+        }
+      }
+    }
+
+    if (canMemo) resolvedProjectMemo.set(cid, matched || null);
+    return matched;
   }
 
   // Build top-level conversations belonging to configured projects (or fallback)
@@ -2265,6 +2347,71 @@ export function buildTelemetrySnapshot({
       if (!/^[0-9a-f-]{8,}$/i.test(id)) continue;
       const parsed = parseAgyTranscript(resolveTranscriptFile(cliBrainDir, id), id);
       if (parsed) parsedAgyCli.set(id, parsed);
+    }
+  }
+
+  // Link headless AGY CLI sessions & orphaned subagents (whose SQLite rows omit workspace_uris/project_id)
+  // back to their dispatching desktop parent via explicit CLI dispatch UUIDs, /brain/<parent>/ paths, or prompt probes.
+  parsedDesktopRef = parsedDesktop;
+  parsedAgyCliRef = parsedAgyCli;
+  const desktopParentsWithProj = [];
+  const desktopProjByIdLower = new Map();
+  for (const [gid, parsed] of parsedDesktop.entries()) {
+    if (parsedAgyCli.has(gid)) continue;
+    const proj = resolveProjectFromDb(gid);
+    if (!proj) continue;
+    const s = summaryById.get(gid);
+    const firstMs = parsed.firstStepAt || parsed.turns?.[0]?.ts || parsed.mtimeMs || 0;
+    const lastMs = Math.max(s?.lastModifiedMs || 0, parsed.lastStepAt || 0, parsed.mtimeMs || 0);
+    desktopProjByIdLower.set(gid.toLowerCase(), gid);
+    desktopParentsWithProj.push({ gid, parsed, firstMs, lastMs });
+  }
+  desktopParentsWithProj.sort((a, b) => b.lastMs - a.lastMs);
+
+  for (const [cid, parsed] of parsedAgyCli.entries()) {
+    const cidLower = cid.toLowerCase();
+    for (const bpId of parsed.brainPathUuids || []) {
+      const parentGid = desktopProjByIdLower.get(bpId);
+      if (parentGid) {
+        inferredParentByChildLower.set(cidLower, parentGid);
+        break;
+      }
+    }
+  }
+
+  for (const dp of desktopParentsWithProj) {
+    if (!dp.parsed.hasCliInvocation) continue;
+    for (const refLower of dp.parsed.cliDispatchedUuids || []) {
+      if (!inferredParentByChildLower.has(refLower)) {
+        inferredParentByChildLower.set(refLower, dp.gid);
+      }
+    }
+  }
+
+  // Final fallback for brand-new Step-0 headless CLI sessions without DB URIs, observed paths, or --conversation UUID:
+  // match prompt fingerprint against recent desktop dispatch commands/scratch files.
+  const cliDispatchParents = desktopParentsWithProj.filter((dp) => dp.parsed.hasCliInvocation);
+  if (cliDispatchParents.length > 0) {
+    for (const [cid, parsed] of parsedAgyCli.entries()) {
+      const cidLower = cid.toLowerCase();
+      if (inferredParentByChildLower.has(cidLower)) continue;
+      if (resolveProjectForConv(cid)) continue;
+      if (!parsed.promptProbes?.length) continue;
+      const cFirst = parsed.firstStepAt || parsed.turns?.[0]?.ts || parsed.mtimeMs || 0;
+      for (const dp of cliDispatchParents) {
+        if (cFirst > 0 && dp.firstMs > 0 && cFirst < dp.firstMs - 120_000) continue;
+        if (cFirst > 0 && dp.lastMs > 0 && cFirst > dp.lastMs + 10 * 60_000) continue;
+        const scratchSig = readConversationScratchSignals(join(desktopBrainDir, dp.gid), dp.gid);
+        const blob =
+          dp.parsed.cliDispatchBlob && scratchSig.dispatchNorm
+            ? `${dp.parsed.cliDispatchBlob}\n${scratchSig.dispatchNorm}`
+            : dp.parsed.cliDispatchBlob || scratchSig.dispatchNorm || '';
+        if (blob && parsed.promptProbes.every((p) => blob.includes(p))) {
+          inferredParentByChildLower.set(cidLower, dp.gid);
+          resolvedProjectMemo.delete(cid);
+          break;
+        }
+      }
     }
   }
 
