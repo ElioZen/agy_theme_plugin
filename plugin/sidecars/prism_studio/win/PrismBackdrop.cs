@@ -6,6 +6,7 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
@@ -173,6 +174,16 @@ namespace PrismBackdropWin
 
         [DllImport("user32.dll")]
         public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
+        public static string GetWindowClassName(IntPtr hWnd)
+        {
+            StringBuilder sb = new StringBuilder(128);
+            int len = GetClassName(hWnd, sb, sb.Capacity);
+            return len > 0 ? sb.ToString() : "";
+        }
 
         [DllImport("user32.dll")]
         public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
@@ -1036,6 +1047,12 @@ namespace PrismBackdropWin
 
                 string procName = GetProcessNameCached(pid);
                 if (!procName.Contains("antigravity")) return true;
+
+                // Only target real Electron main windows (skip native #32770 file/folder pickers & tool dialogs)
+                string cls = Native.GetWindowClassName(hwnd);
+                if (!string.Equals(cls, "Chrome_WidgetWin_1", StringComparison.Ordinal)) return true;
+                int exStyle = Native.GetWindowLong(hwnd, Native.GWL_EXSTYLE);
+                if ((exStyle & Native.WS_EX_TOOLWINDOW) != 0) return true;
 
                 // Skip tiny helper/popup/menu windows; pick main Electron host window
                 Native.RECT rect;
