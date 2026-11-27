@@ -1445,6 +1445,7 @@
         const meta = bucket.burnMeta || {};
         const srcMap = {
           'official-ewma': '官方多日加权',
+          'official-blended': '官方多日 + 本周期融合',
           'hybrid-ewma': '官方历史 + 本地日志校准加权',
           'calibrated-ewma': '本地日志自校准加权',
           cycle: '当前周期实测均速',
@@ -1463,7 +1464,7 @@
           lines.push(`按当前节奏预计可用：${meta.etaDays > 30 ? '>30' : meta.etaDays.toFixed(1)} 天`);
         }
         if (typeof meta.todayUsedPct === 'number') {
-          lines.push(`今日已用：${meta.todayUsedPct.toFixed(1)}%（日内活跃进度 ${Math.round((meta.todayExposure || 0) * 100)}%）`);
+          lines.push(`今日已用：${meta.todayUsedPct.toFixed(1)}%（今日时间进度 ${Math.round((meta.todayExposure || 0) * 100)}%）`);
         }
         if (meta.safeDailyBudgetPct > 0) {
           lines.push(`距重置安全日预算：≤ ${meta.safeDailyBudgetPct.toFixed(1)}%/天`);
