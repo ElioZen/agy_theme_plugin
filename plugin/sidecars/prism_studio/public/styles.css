@@ -84,6 +84,22 @@ body.companion-seamless .wallpaper-layer {
   transition: opacity 0.22s ease;
 }
 
+body.companion-unified {
+  background: color-mix(in srgb, var(--prism-canvas) 70%, #13161F) !important;
+}
+body.companion-unified .wallpaper-layer,
+body.companion-unified .scrim-layer {
+  opacity: 0 !important;
+}
+body.companion-unified .glass-surface,
+body.companion-unified .glass-card {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+body.companion-unified .slider-item[data-right-pane-only="1"] {
+  opacity: 0.42;
+}
+
 /* ==================== COMPACT SHELL & TOPBAR ==================== */
 .app-shell {
   position: relative;
@@ -1496,6 +1512,7 @@ input[type="range"] { width: 100%; accent-color: var(--prism-accent); cursor: po
   cursor: pointer;
 }
 .checkbox-item input { accent-color: var(--prism-accent); width: 14px; height: 14px; margin: 0; }
+.checkbox-item.is-disabled { opacity: 0.48; cursor: default; }
 .error-text { margin: 8px 0 0; font-size: 11px; color: #f87171; }
 
 .toast {

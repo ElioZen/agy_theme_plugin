@@ -434,12 +434,12 @@ final class BackdropController: NSObject {
         let size = (attrs?[.size] as? NSNumber)?.uint64Value ?? 0
         let sig = "\(inode)|\(mtime)|\(size)"
         if !force && sig == lastConfigSig { return }
-        lastConfigSig = sig
 
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: configPath)),
               let decoded = try? JSONDecoder().decode(CompanionConfig.self, from: data) else {
             return
         }
+        lastConfigSig = sig
         config = decoded
         canvasView.apply(config: decoded)
     }

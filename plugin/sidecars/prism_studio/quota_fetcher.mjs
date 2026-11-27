@@ -120,8 +120,25 @@ function findCodexBinary() {
   return { bin: 'codex', useShell: false, useWslCmd: false };
 }
 
+function killProcessGroup(child, signal = 'SIGTERM') {
+  if (!child) return;
+  if (!IS_WIN && child.pid) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // fall back to direct child signal
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // ignore
+  }
+}
+
 const PYTHON_PTY_RUNNER = `
-import os, pty, select, subprocess, sys, time
+import fcntl, os, pty, select, signal, subprocess, sys, termios, time
 
 agy_bin, settings_json, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
 if os.path.exists(out_path):
@@ -130,17 +147,31 @@ if os.path.exists(out_path):
     except OSError:
         pass
 
+def _on_term(_signum, _frame):
+    raise SystemExit(0)
+
+signal.signal(signal.SIGTERM, _on_term)
+
 master, slave = pty.openpty()
+
+def _setup_child():
+    os.setsid()
+    try:
+        fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+    except OSError:
+        pass
+
 proc = subprocess.Popen(
     [agy_bin, "--project", "default-cli-project", "--settings", settings_json],
     stdin=slave,
     stdout=slave,
     stderr=slave,
     close_fds=True,
+    preexec_fn=_setup_child,
 )
 os.close(slave)
 
-deadline = time.time() + 10.0
+deadline = time.time() + 14.0
 captured_at = 0.0
 try:
     while time.time() < deadline:
@@ -167,11 +198,24 @@ finally:
         proc.wait(timeout=1.5)
     except Exception:
         try:
-            proc.terminate()
-            proc.wait(timeout=1.5)
+            os.killpg(proc.pid, signal.SIGTERM)
         except Exception:
             try:
-                proc.kill()
+                proc.terminate()
+            except Exception:
+                pass
+        try:
+            proc.wait(timeout=1.0)
+        except Exception:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            try:
+                proc.wait(timeout=1.0)
             except Exception:
                 pass
     try:
@@ -181,7 +225,7 @@ finally:
 `;
 
 const PYTHON_MODEL_PROBE_RUNNER = `
-import json, os, pty, select, subprocess, sys, time
+import fcntl, json, os, pty, select, signal, subprocess, sys, termios, time
 
 agy_bin, model_id, settings_json, out_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 if os.path.exists(out_path):
@@ -190,13 +234,27 @@ if os.path.exists(out_path):
     except OSError:
         pass
 
+def _on_term(_signum, _frame):
+    raise SystemExit(0)
+
+signal.signal(signal.SIGTERM, _on_term)
+
 master, slave = pty.openpty()
+
+def _setup_child():
+    os.setsid()
+    try:
+        fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+    except OSError:
+        pass
+
 proc = subprocess.Popen(
     [agy_bin, "--project", "default-cli-project", "--model", model_id, "--settings", settings_json],
     stdin=slave,
     stdout=slave,
     stderr=slave,
     close_fds=True,
+    preexec_fn=_setup_child,
 )
 os.close(slave)
 
@@ -223,11 +281,24 @@ finally:
         proc.wait(timeout=1.5)
     except Exception:
         try:
-            proc.terminate()
-            proc.wait(timeout=1.5)
+            os.killpg(proc.pid, signal.SIGTERM)
         except Exception:
             try:
-                proc.kill()
+                proc.terminate()
+            except Exception:
+                pass
+        try:
+            proc.wait(timeout=1.0)
+        except Exception:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            try:
+                proc.wait(timeout=1.0)
             except Exception:
                 pass
     try:
@@ -1275,6 +1346,7 @@ export class AgyQuotaFetcher {
   #modelProbeQueue = [];
   #modelProbeQueuedSet = new Set();
   #modelProbing = false;
+  #activeChildren = new Set();
 
   constructor(storage) {
     this.#storage = storage;
@@ -1644,18 +1716,24 @@ export class AgyQuotaFetcher {
         child = spawn('python3', ['-c', PYTHON_MODEL_PROBE_RUNNER, agy.bin, probeArg, settingsJson, probeOut], {
           stdio: ['ignore', 'ignore', 'ignore'],
           env,
+          detached: true,
         });
       }
 
+      this.#activeChildren.add(child);
+      let settled = false;
+      const softKill = setTimeout(() => {
+        killProcessGroup(child, 'SIGTERM');
+      }, 10500);
       const hardKill = setTimeout(() => {
-        try {
-          child.kill('SIGKILL');
-        } catch {
-          // ignore
-        }
-      }, 11000);
+        killProcessGroup(child, 'SIGKILL');
+      }, 12500);
 
       const onDone = () => {
+        if (settled) return;
+        settled = true;
+        this.#activeChildren.delete(child);
+        clearTimeout(softKill);
         clearTimeout(hardKill);
         if (pollTimer) clearInterval(pollTimer);
         try {
@@ -1757,6 +1835,10 @@ export class AgyQuotaFetcher {
       clearInterval(this.#timer);
       this.#timer = null;
     }
+    for (const child of this.#activeChildren) {
+      killProcessGroup(child, 'SIGTERM');
+    }
+    this.#activeChildren.clear();
   }
 
   async refresh() {
@@ -1781,18 +1863,13 @@ export class AgyQuotaFetcher {
         settled = true;
         if (hardKill) clearTimeout(hardKill);
         if (termKill) clearTimeout(termKill);
-        if (child && !child.killed) {
-          try {
-            child.kill('SIGTERM');
-          } catch {
-            // ignore
-          }
+        if (child) {
+          this.#activeChildren.delete(child);
+        }
+        if (child && !child.killed && child.exitCode === null) {
+          killProcessGroup(child, 'SIGTERM');
           termKill = setTimeout(() => {
-            try {
-              child.kill('SIGKILL');
-            } catch {
-              // ignore
-            }
+            killProcessGroup(child, 'SIGKILL');
           }, 1200);
           termKill.unref?.();
         }
@@ -1806,6 +1883,7 @@ export class AgyQuotaFetcher {
           child = spawn('/mnt/c/Windows/System32/cmd.exe', ['/c', toWindowsPath(codex.bin), 'app-server', '--stdio'], {
             stdio: ['pipe', 'pipe', 'ignore'],
             env,
+            detached: !IS_WIN,
             windowsHide: true,
           });
         } else {
@@ -1813,9 +1891,11 @@ export class AgyQuotaFetcher {
             stdio: ['pipe', 'pipe', 'ignore'],
             env,
             shell: codex.useShell,
+            detached: !IS_WIN,
             windowsHide: true,
           });
         }
+        this.#activeChildren.add(child);
 
         hardKill = setTimeout(finish, 9000);
         let stdoutBuf = '';
@@ -1941,26 +2021,29 @@ export class AgyQuotaFetcher {
           child = spawn('python3', ['-c', PYTHON_PTY_RUNNER, agy.bin, settingsJson, this.#livePayloadPath], {
             stdio: ['ignore', 'ignore', 'pipe'],
             env,
+            detached: true,
           });
         }
 
+        this.#activeChildren.add(child);
         let errBuf = '';
         let settled = false;
         child.stderr?.on('data', (c) => {
           errBuf += c.toString();
         });
 
+        const softKill = setTimeout(() => {
+          killProcessGroup(child, 'SIGTERM');
+        }, 17000);
         const hardKill = setTimeout(() => {
-          try {
-            child.kill('SIGKILL');
-          } catch {
-            // ignore
-          }
-        }, 14000);
+          killProcessGroup(child, 'SIGKILL');
+        }, 19000);
 
         const onDone = (spawnErr) => {
           if (settled) return;
           settled = true;
+          this.#activeChildren.delete(child);
+          clearTimeout(softKill);
           clearTimeout(hardKill);
           if (pollTimer) clearInterval(pollTimer);
           try {
@@ -1977,6 +2060,11 @@ export class AgyQuotaFetcher {
                 this.#saveCache(snap);
                 this.#recordHistory(raw.quota, nowMs);
                 this.#lastError = '';
+                resolve(this.getSnapshot());
+                return;
+              }
+              if (raw && raw.agent_state === 'authenticating') {
+                this.#lastError = 'agy CLI 尚未登录（请在终端运行一次 agy 完成账号登录）';
                 resolve(this.getSnapshot());
                 return;
               }

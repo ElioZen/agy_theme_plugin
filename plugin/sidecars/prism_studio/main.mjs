@@ -15,10 +15,49 @@ import {
 import { buildTelemetrySnapshot } from './telemetry.mjs';
 import { ONLINE_SOURCES, OnlineWallpaperGallery } from './wallpaper_gallery.mjs';
 
+// Prevent POSIX terminal job-control stop signals from ever suspending the sidecar HTTP server
+// when Antigravity's language_server runs attached to a controlling PTY (e.g. WSL2 / terminal launch).
+if (process.platform !== 'win32') {
+  try {
+    process.on('SIGTTIN', () => {});
+    process.on('SIGTTOU', () => {});
+  } catch {
+    // ignore
+  }
+}
+
 const storage = new PrismStorage();
 const companion = new MacBackdropCompanion(storage);
 const quotaFetcher = new AgyQuotaFetcher(storage);
 const onlineGallery = new OnlineWallpaperGallery(storage);
+
+const PANE_LEASE_TTL_MS = 3200;
+let activePaneClientId = '';
+let lastPaneHeartbeatMs = 0;
+
+function clearRightPaneCutout() {
+  activePaneClientId = '';
+  lastPaneHeartbeatMs = 0;
+  const changed = storage.setRightPaneMetrics(0, 0);
+  if (changed) {
+    const current = storage.loadSettings();
+    if (current.companion?.enabled) {
+      storage.syncCompanionConfig(current);
+    }
+  }
+  return changed;
+}
+
+const paneLeaseTimer = setInterval(() => {
+  if (
+    (storage.rightPaneWidth > 0 || storage.rightPaneHeight > 0) &&
+    lastPaneHeartbeatMs > 0 &&
+    Date.now() - lastPaneHeartbeatMs > PANE_LEASE_TTL_MS
+  ) {
+    clearRightPaneCutout();
+  }
+}, 1000);
+paneLeaseTimer.unref?.();
 
 const MIME_BY_EXT = {
   '.html': 'text/html; charset=utf-8',
@@ -58,6 +97,7 @@ function buildStatePayload(settings = storage.loadSettings()) {
 }
 
 function cleanup() {
+  clearInterval(paneLeaseTimer);
   quotaFetcher.stop();
   companion.stop();
 }
@@ -114,13 +154,25 @@ app.api('/api/settings', async (data) => {
 });
 
 app.api('/api/pane-metrics', (data) => {
-  const changed = storage.setRightPaneMetrics(data?.width, data?.height);
-  if (changed) {
-    const current = storage.loadSettings();
-    if (current.companion?.enabled) {
-      storage.syncCompanionConfig(current);
+  const clientId = String(data?.clientId || '');
+  const rawW = Number(data?.width || 0);
+  const rawH = Number(data?.height || 0);
+  const isVisible = data?.visible !== false && Number.isFinite(rawW) && rawW >= 120 && Number.isFinite(rawH) && rawH >= 120;
+
+  if (isVisible) {
+    activePaneClientId = clientId || activePaneClientId || 'default';
+    lastPaneHeartbeatMs = Date.now();
+    const changed = storage.setRightPaneMetrics(rawW, rawH);
+    if (changed) {
+      const current = storage.loadSettings();
+      if (current.companion?.enabled) {
+        storage.syncCompanionConfig(current);
+      }
     }
+  } else if (!clientId || !activePaneClientId || clientId === activePaneClientId) {
+    clearRightPaneCutout();
   }
+
   return {
     ok: true,
     rightPaneWidth: storage.rightPaneWidth,

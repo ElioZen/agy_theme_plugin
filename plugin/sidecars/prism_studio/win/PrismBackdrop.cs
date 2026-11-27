@@ -1015,15 +1015,16 @@ namespace PrismBackdropWin
             try
             {
                 FileInfo fi = new FileInfo(_configPath);
+                fi.Refresh();
                 string sig = fi.LastWriteTimeUtc.Ticks + "|" + fi.Length;
                 if (!force && sig == _lastConfigSig) return;
-                _lastConfigSig = sig;
 
                 string json = File.ReadAllText(_configPath);
                 CompanionConfig decoded = _serializer.Deserialize<CompanionConfig>(json);
                 if (decoded != null)
                 {
                     _config = decoded;
+                    _lastConfigSig = sig;
                 }
             }
             catch { }
@@ -1312,6 +1313,25 @@ namespace PrismBackdropWin
             }
 
             Native.EnableDpiAwareness();
+
+            // Single-instance takeover: terminate any stale PrismBackdrop.exe so duplicate overlays can never linger
+            try
+            {
+                int myPid = Process.GetCurrentProcess().Id;
+                foreach (Process p in Process.GetProcessesByName("PrismBackdrop"))
+                {
+                    try
+                    {
+                        if (p.Id != myPid && !p.HasExited) p.Kill();
+                    }
+                    catch { }
+                    finally
+                    {
+                        p.Dispose();
+                    }
+                }
+            }
+            catch { }
 
             string configPath = args[0];
             int winParentPid = 0;

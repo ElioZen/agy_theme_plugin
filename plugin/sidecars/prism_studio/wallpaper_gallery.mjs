@@ -1,7 +1,9 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
+import { IS_WIN, IS_WSL } from './platform.mjs';
 
-const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
+// Windows .NET GDI+ (PrismBackdrop.exe) natively decodes JPG/PNG but not WebP
+const IMAGE_EXTS = new Set(IS_WIN || IS_WSL ? ['.jpg', '.jpeg', '.png'] : ['.jpg', '.jpeg', '.png', '.webp']);
 const INDEX_TTL_MS = 24 * 60 * 60 * 1000;
 
 export const ONLINE_SOURCES = [
@@ -109,7 +111,8 @@ async function loadWikimediaIndex() {
         const info = page?.imageinfo?.[0];
         if (!info) continue;
         const mime = String(info.mime || '');
-        if (!mime.includes('jpeg') && !mime.includes('png') && !mime.includes('webp')) continue;
+        const allowWebp = !(IS_WIN || IS_WSL);
+        if (!mime.includes('jpeg') && !mime.includes('png') && !(allowWebp && mime.includes('webp'))) continue;
         // Prefer wide landscape aspect ratios for desktop wallpapers
         const w = Number(info.width || 0);
         const h = Number(info.height || 0);
@@ -225,8 +228,10 @@ export class OnlineWallpaperGallery {
       }
       if (!pool.length) continue;
 
-      const fresh = pool.filter((item) => !this.#recentIds.includes(item.id));
-      const candidates = fresh.length ? fresh : pool;
+      const gdiSafe = IS_WIN || IS_WSL ? pool.filter((item) => item.ext !== '.webp') : pool;
+      const basePool = gdiSafe.length ? gdiSafe : pool;
+      const fresh = basePool.filter((item) => !this.#recentIds.includes(item.id));
+      const candidates = fresh.length ? fresh : basePool;
 
       // Try up to 3 random candidates in this source in case one image URL fails
       for (let attempt = 0; attempt < 3; attempt += 1) {

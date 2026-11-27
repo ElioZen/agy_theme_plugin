@@ -286,9 +286,13 @@
               <input id="range-comp-blur" type="range" min="0" max="36" value="0" />
             </label>
             <div class="checkbox-stack">
-              <label class="checkbox-item" title="勾选后右侧面板按整窗坐标系无缝接续壁纸，且两侧亮度/模糊/磨砂独立可控；取消勾选后右侧独立铺图居中">
+              <label class="checkbox-item" title="勾选后右侧面板按整窗坐标系无缝接续壁纸；取消勾选后右侧独立铺图居中">
                 <input id="chk-comp-seamless" type="checkbox" checked />
                 <span>左右窗口壁纸无缝贯穿</span>
+              </label>
+              <label class="checkbox-item" id="lbl-comp-independent-style" title="勾选后即使开启无缝贯穿，右侧驾驶舱依然独立保留下方的透明度、磨砂预设与模糊参数，不被左侧伴侣的亮度/柔焦影响；取消勾选则左右画质完全统一">
+                <input id="chk-comp-independent-style" type="checkbox" checked />
+                <span>贯穿时保持右侧独立画质</span>
               </label>
               <label class="checkbox-item">
                 <input id="chk-comp-rim" type="checkbox" checked />
@@ -334,8 +338,8 @@
           <div id="wallpaper-grid" class="wallpaper-grid"></div>
 
           <div id="seamless-override-bar" class="seamless-notice-bar" hidden>
-            <span>当前为「整窗无缝贯穿」模式，下方磨砂底图参数已由上方伴侣接管</span>
-            <button id="btn-enable-right-frost" class="ghost-btn compact-btn" type="button">切为右侧真磨砂</button>
+            <span>当前为「整窗统一画质贯穿」，右侧底图亮度与柔焦由上方伴侣接管</span>
+            <button id="btn-enable-right-frost" class="ghost-btn compact-btn" type="button">保持右侧独立画质</button>
           </div>
 
           <div class="glass-style-row">

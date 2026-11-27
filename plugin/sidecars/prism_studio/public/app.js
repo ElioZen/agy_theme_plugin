@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_VERSION = '3.9.2';
+  const FRONTEND_VERSION = '3.9.4';
   const FALLBACK_GLASS_PRESETS = [
     {
       id: 'frosted-dark',
@@ -514,10 +514,14 @@
     }
 
     const comp = settings.companion || {};
-    const isSeamless = Boolean(appState?.companion?.running && comp.enabled && comp.seamlessRightPane !== false);
-    document.body.classList.toggle('companion-seamless', isSeamless);
+    const isCompanionActive = Boolean(appState?.companion?.running && comp.enabled);
+    const isSeamless = isCompanionActive && comp.seamlessRightPane !== false;
+    const isIndependentRight = comp.seamlessIndependentStyle !== false;
+    const isUnifiedOverlay = isSeamless && !isIndependentRight;
+    document.body.classList.toggle('companion-seamless', isSeamless && isIndependentRight);
+    document.body.classList.toggle('companion-unified', isUnifiedOverlay);
     const noticeBar = $('#seamless-override-bar');
-    if (noticeBar) noticeBar.hidden = true;
+    if (noticeBar) noticeBar.hidden = !isUnifiedOverlay;
     syncGlassPresetHighlight(settings);
   }
 
@@ -548,7 +552,12 @@
     if (wp.kind === 'none' || !wp.id) return;
     const fit = wp.fit === 'contain' ? 'contain' : 'cover';
     const comp = settings?.companion || {};
-    const isSeamless = Boolean(appState?.companion?.running && comp.enabled && comp.seamlessRightPane !== false);
+    const isSeamless = Boolean(
+      appState?.companion?.running &&
+      comp.enabled &&
+      comp.seamlessRightPane !== false &&
+      comp.seamlessIndependentStyle !== false,
+    );
     const metrics = appState?.companionMetrics || null;
     const url = urlOverride || `/api/wallpaper?kind=${encodeURIComponent(wp.kind)}&id=${encodeURIComponent(wp.id)}`;
     const dims = wallpaperNaturalDims.get(url);
@@ -564,8 +573,15 @@
     ) {
       const winW = Number(metrics.winWidth);
       const winH = Number(metrics.winHeight);
-      const paneLeft = Number(metrics.paneLeft || 0);
-      const paneTop = Number(metrics.paneTop || 0);
+      const hasValidCutout = Number(metrics.paneWidth) >= 120 && Number(metrics.paneHeight) >= 120;
+      const paneW = Math.round(window.innerWidth || 0);
+      const paneH = Math.round(window.innerHeight || 0);
+      const paneLeft = hasValidCutout
+        ? Number(metrics.paneLeft || 0)
+        : Math.max(0, winW - 8 - Math.min(paneW, Math.round(winW * 0.72)));
+      const paneTop = hasValidCutout
+        ? Number(metrics.paneTop || 0)
+        : Math.max(0, winH - 8 - paneH);
       const scale =
         fit === 'contain'
           ? Math.min(winW / dims.w, winH / dims.h)
@@ -608,27 +624,98 @@
     });
   }
 
+  const paneClientId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   let lastReportedPaneKey = '';
+  let paneIntersecting = true;
+  let paneHeartbeatTimer = null;
+  let paneMetricsFollowupTimer = null;
 
-  function reportPaneWidth(force = false) {
-    const w = document.hidden ? 0 : Math.round(window.innerWidth || 0);
-    const h = document.hidden ? 0 : Math.round(window.innerHeight || 0);
-    const key = `${w}x${h}`;
-    if (!force && key === lastReportedPaneKey) return;
+  function isPaneActuallyVisible() {
+    if (document.hidden) return false;
+    const w = Math.round(window.innerWidth || 0);
+    const h = Math.round(window.innerHeight || 0);
+    if (w < 120 || h < 120) return false;
+    if (!paneIntersecting) return false;
+    return true;
+  }
+
+  function reportPaneWidth(force = false, { keepalive = false, isHeartbeat = false } = {}) {
+    const visible = isPaneActuallyVisible();
+    const w = visible ? Math.round(window.innerWidth || 0) : 0;
+    const h = visible ? Math.round(window.innerHeight || 0) : 0;
+    const key = `${w}x${h}:${visible ? 1 : 0}`;
+    if (!force && !isHeartbeat && key === lastReportedPaneKey) return;
+    if (isHeartbeat && !visible && key === lastReportedPaneKey) return;
     lastReportedPaneKey = key;
     lastReportedPaneWidth = w;
     apiFetch('/api/pane-metrics', {
       method: 'POST',
-      body: JSON.stringify({ width: w, height: h }),
+      keepalive,
+      body: JSON.stringify({ clientId: paneClientId, width: w, height: h, visible }),
     })
       .then((r) => (r.ok ? r.json() : null))
       .then((res) => {
         if (res?.companionMetrics && appState) {
           appState.companionMetrics = res.companionMetrics;
           if (appState.settings) applySeamlessWallpaperGeometry(appState.settings);
+          // Right after startup or returning from another sidebar tab, companion_metrics.json may
+          // take one companion tick (~33-50ms) to reflect the new cutout; sync once shortly after.
+          if (visible && !isHeartbeat && Number(res.companionMetrics.paneWidth || 0) < 120) {
+            clearTimeout(paneMetricsFollowupTimer);
+            paneMetricsFollowupTimer = setTimeout(() => reportPaneWidth(false, { isHeartbeat: true }), 180);
+          }
         }
       })
       .catch(() => {});
+  }
+
+  function clearPaneWidthOnExit() {
+    lastReportedPaneWidth = 0;
+    lastReportedPaneKey = '0x0:0';
+    apiFetch('/api/pane-metrics', {
+      method: 'POST',
+      keepalive: true,
+      body: JSON.stringify({ clientId: paneClientId, width: 0, height: 0, visible: false }),
+    }).catch(() => {});
+  }
+
+  function setupPaneVisibilityTrackers() {
+    if (typeof ResizeObserver === 'function') {
+      try {
+        const ro = new ResizeObserver(() => {
+          clearTimeout(paneResizeTimer);
+          paneResizeTimer = setTimeout(() => reportPaneWidth(false), 60);
+        });
+        ro.observe(document.documentElement);
+      } catch {
+        // ignore
+      }
+    }
+
+    if (typeof IntersectionObserver === 'function') {
+      try {
+        const ioV1 = new IntersectionObserver(
+          (entries) => {
+            const ent = entries[entries.length - 1];
+            if (!ent) return;
+            const next = Boolean(ent.isIntersecting && ent.intersectionRatio > 0);
+            if (next !== paneIntersecting) {
+              paneIntersecting = next;
+              reportPaneWidth(true);
+            }
+          },
+          { threshold: [0, 0.05] },
+        );
+        ioV1.observe(document.documentElement);
+      } catch {
+        // ignore
+      }
+    }
+
+    if (paneHeartbeatTimer) clearInterval(paneHeartbeatTimer);
+    paneHeartbeatTimer = setInterval(() => {
+      reportPaneWidth(false, { isHeartbeat: true });
+    }, 1200);
   }
 
   function syncCompanionControls(state) {
@@ -643,10 +730,23 @@
 
     const isCompanionActive = Boolean(companion?.running && comp.enabled);
     const isSeamless = isCompanionActive && comp.seamlessRightPane !== false;
-    document.body.classList.toggle('companion-seamless', isSeamless);
+    const isIndependentRight = comp.seamlessIndependentStyle !== false;
+    const isUnifiedOverlay = isSeamless && !isIndependentRight;
+    document.body.classList.toggle('companion-seamless', isSeamless && isIndependentRight);
+    document.body.classList.toggle('companion-unified', isUnifiedOverlay);
     const noticeBar = $('#seamless-override-bar');
-    if (noticeBar) noticeBar.hidden = true;
+    if (noticeBar) noticeBar.hidden = !isUnifiedOverlay;
     if (state.settings) applySeamlessWallpaperGeometry(state.settings);
+
+    const indChk = $('#chk-comp-independent-style');
+    const indLbl = $('#lbl-comp-independent-style');
+    if (indChk) {
+      indChk.checked = isIndependentRight;
+      indChk.disabled = comp.seamlessRightPane === false;
+    }
+    if (indLbl) {
+      indLbl.classList.toggle('is-disabled', comp.seamlessRightPane === false);
+    }
 
     if (!companion?.supported) {
       badge.textContent = '仅支持 macOS / Windows';
@@ -657,7 +757,9 @@
       badge.classList.add('warn');
       toggleBtn.textContent = '正在准备...';
     } else if (isCompanionActive) {
-      badge.textContent = isSeamless ? '● 运行中 · 无缝贯穿' : '● 运行中 · 独立铺图';
+      badge.textContent = isSeamless
+        ? (isIndependentRight ? '● 运行中 · 无缝独立画质' : '● 运行中 · 整窗统一画质')
+        : '● 运行中 · 独立铺图';
       badge.classList.add('running');
       toggleBtn.textContent = '关闭整窗氛围';
       toggleBtn.classList.add('is-active-danger');
@@ -828,6 +930,15 @@
     $('#range-comp-blur').value = comp.blur ?? 0;
     $('#val-comp-blur').textContent = `${comp.blur ?? 0}px`;
     $('#chk-comp-seamless').checked = comp.seamlessRightPane !== false;
+    const indChk = $('#chk-comp-independent-style');
+    const indLbl = $('#lbl-comp-independent-style');
+    if (indChk) {
+      indChk.checked = comp.seamlessIndependentStyle !== false;
+      indChk.disabled = comp.seamlessRightPane === false;
+    }
+    if (indLbl) {
+      indLbl.classList.toggle('is-disabled', comp.seamlessRightPane === false);
+    }
     $('#chk-comp-rim').checked = comp.glassRim !== false;
     $('#chk-comp-frontmost').checked = Boolean(comp.onlyWhenFrontmost);
 
@@ -1913,17 +2024,23 @@
     const action = isRunning ? 'stop' : 'start';
     if (action === 'start') reportPaneWidth(true);
     showToast(action === 'start' ? '正在开启星光滤色整窗氛围...' : '正在关闭整窗氛围...');
-    const res = await apiFetch('/api/companion', {
-      method: 'POST',
-      body: JSON.stringify({ action }),
-    });
-    if (res.ok) {
+    try {
+      const res = await apiFetch('/api/companion', {
+        method: 'POST',
+        body: JSON.stringify({ action }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
       appState = await res.json();
       renderStudio();
       if (action === 'start') {
         setTimeout(() => reportPaneWidth(true), 250);
       }
       showToast(appState.companion?.running ? '整窗氛围伴侣已开启 ✨' : '整窗氛围伴侣已关闭');
+    } catch (err) {
+      showToast(`操作失败：${err?.message || '请重开驾驶舱重试'}`);
     }
   }
 
@@ -2405,8 +2522,18 @@
       if (!btn) return;
       const preset = getGlassPresets().find((p) => p.id === btn.dataset.glassPreset);
       if (!preset) return;
-      await queueSaveSettings({ wallpaper: { ...preset.values } }, true);
+      const patch = { wallpaper: { ...preset.values } };
+      if (appState?.settings?.companion?.seamlessRightPane !== false && appState?.settings?.companion?.seamlessIndependentStyle === false) {
+        patch.companion = { seamlessIndependentStyle: true };
+      }
+      await queueSaveSettings(patch, true);
       showToast(`已应用「${preset.name}」磨砂预设 ✨`);
+    });
+
+    $('#btn-enable-right-frost')?.addEventListener('click', async () => {
+      reportPaneWidth(true);
+      await queueSaveSettings({ companion: { seamlessIndependentStyle: true } }, true);
+      showToast('已切换为「贯穿时保持右侧独立画质」✨');
     });
 
     $('#wp-fit-group').addEventListener('click', (e) => {
@@ -2418,6 +2545,10 @@
     $('#chk-comp-seamless').addEventListener('change', (e) => {
       reportPaneWidth(true);
       queueSaveSettings({ companion: { seamlessRightPane: e.target.checked } }, true);
+    });
+    $('#chk-comp-independent-style')?.addEventListener('change', (e) => {
+      reportPaneWidth(true);
+      queueSaveSettings({ companion: { seamlessIndependentStyle: e.target.checked } }, true);
     });
     $('#chk-comp-rim').addEventListener('change', (e) => {
       queueSaveSettings({ companion: { glassRim: e.target.checked } }, true);
@@ -2436,11 +2567,9 @@
       paneResizeTimer = setTimeout(() => reportPaneWidth(false), 100);
     });
     document.addEventListener('visibilitychange', () => reportPaneWidth(true));
-    window.addEventListener('pagehide', () => {
-      lastReportedPaneWidth = 0;
-      lastReportedPaneKey = '';
-      apiFetch('/api/pane-metrics', { method: 'POST', body: JSON.stringify({ width: 0, height: 0 }) }).catch(() => {});
-    });
+    window.addEventListener('pagehide', clearPaneWidthOnExit);
+    window.addEventListener('beforeunload', clearPaneWidthOnExit);
+    setupPaneVisibilityTrackers();
   }
 
   async function init() {

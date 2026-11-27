@@ -191,15 +191,16 @@ export class BackdropCompanion {
       if (this.#backend === 'mac') {
         child = spawn(bin, [this.#storage.companionConfigPath, String(process.pid)], {
           stdio: ['ignore', 'ignore', 'pipe'],
-          detached: false,
+          detached: true,
         });
       } else {
         const winConfigPath = toWindowsPath(this.#storage.companionConfigPath);
         const winParentPid = IS_WIN ? String(process.pid) : '0';
-        // Keep stdin pipe open so PrismBackdrop.exe exits cleanly & instantly if sidecar terminates
+        // Keep stdin pipe open so PrismBackdrop.exe exits cleanly & instantly if sidecar terminates;
+        // on WSL2, detached: true isolates /init interop from language_server's controlling tty.
         child = spawn(bin, [winConfigPath, winParentPid], {
           stdio: ['pipe', 'ignore', 'pipe'],
-          detached: false,
+          detached: !IS_WIN,
           windowsHide: true,
         });
       }
@@ -234,17 +235,39 @@ export class BackdropCompanion {
   }
 
   stop() {
-    if (this.#child && !this.#child.killed) {
+    const child = this.#child;
+    if (child && !child.killed) {
       try {
-        // Closing stdin lets Windows/WSL2 PrismBackdrop.exe exit gracefully (hiding overlay & unhooking events)
-        this.#child.stdin?.end();
+        // Closing stdin lets Windows/WSL2 PrismBackdrop.exe run ExitThreadCore() (hiding overlay & unhooking events)
+        child.stdin?.end();
       } catch {
         // ignore
       }
-      try {
-        this.#child.kill('SIGTERM');
-      } catch {
-        // ignore
+      const killLater = () => {
+        if (child.exitCode !== null) return;
+        if (!IS_WIN && child.pid) {
+          try {
+            process.kill(-child.pid, 'SIGTERM');
+          } catch {
+            try {
+              child.kill('SIGTERM');
+            } catch {
+              // ignore
+            }
+          }
+        } else {
+          try {
+            child.kill('SIGTERM');
+          } catch {
+            // ignore
+          }
+        }
+      };
+      if (this.#backend === 'win') {
+        const t = setTimeout(killLater, 150);
+        t.unref?.();
+      } else {
+        killLater();
       }
     }
     this.#child = null;

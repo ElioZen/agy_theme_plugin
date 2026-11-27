@@ -149,7 +149,7 @@ export const GLASS_PRESETS = [
 ];
 
 const SCHEMA_VERSION = 4;
-export const ASSET_VERSION = '3.9.2';
+export const ASSET_VERSION = '3.9.4';
 
 export const DEFAULT_SETTINGS = {
   schemaVersion: SCHEMA_VERSION,
@@ -181,6 +181,7 @@ export const DEFAULT_SETTINGS = {
     blendStyle: 'screen', // 'screen' | 'soft'
     glassRim: true,
     seamlessRightPane: true,
+    seamlessIndependentStyle: true,
   },
   telemetry: {
     followLatest: true,
@@ -235,24 +236,9 @@ export class PrismStorage {
     this.rightPaneHeight = 0;
     this.#metricsCache = { key: '', data: null };
     this.#ensureDirs();
-    this.#hydratePaneMetricsFromDisk();
   }
 
   #metricsCache;
-
-  #hydratePaneMetricsFromDisk() {
-    try {
-      if (existsSync(this.companionConfigPath)) {
-        const raw = JSON.parse(readFileSync(this.companionConfigPath, 'utf-8'));
-        const w = Number(raw?.excludeRightWidth || 0);
-        const h = Number(raw?.excludeRightHeight || 0);
-        if (Number.isFinite(w) && w >= 120) this.rightPaneWidth = Math.round(w);
-        if (Number.isFinite(h) && h >= 120) this.rightPaneHeight = Math.round(h);
-      }
-    } catch {
-      // ignore
-    }
-  }
 
   loadCompanionMetrics() {
     try {
@@ -465,6 +451,8 @@ export class PrismStorage {
   syncCompanionConfig(settings) {
     const wpPath = this.resolveWallpaperPath(settings.wallpaper);
     const seamless = settings.companion?.seamlessRightPane !== false;
+    const independentStyle = settings.companion?.seamlessIndependentStyle !== false;
+    const shouldCutoutRight = !seamless || independentStyle;
     const payload = {
       enabled: Boolean(settings.companion?.enabled),
       imagePath: wpPath,
@@ -480,8 +468,9 @@ export class PrismStorage {
       accentHex: settings.colors?.accent || '#6EA8FF',
       glassRim: settings.companion?.glassRim !== false,
       seamlessRightPane: seamless,
-      excludeRightWidth: this.rightPaneWidth,
-      excludeRightHeight: this.rightPaneHeight,
+      seamlessIndependentStyle: independentStyle,
+      excludeRightWidth: shouldCutoutRight ? this.rightPaneWidth : 0,
+      excludeRightHeight: shouldCutoutRight ? this.rightPaneHeight : 0,
       metricsPath: this.companionMetricsPath,
       winMetricsPath: IS_WIN || IS_WSL ? toWindowsPath(this.companionMetricsPath) : '',
       updatedAt: Date.now(),
