@@ -910,7 +910,9 @@ export function computeWeeklyBurnForecast(
 
   // 3. Reconstruct monotonic high-water-mark daily official increments & detect capped days
   const dailyCost = familyActivity?.dailyCost || null;
-  const dayMap = Object.create(null); // dayKey -> { officialPct, observed, isCapped, officialCycleCount }
+  const hourlyShare = familyActivity?.hourlyShare || fallbackHourlyShare;
+  const todayExposure = computeDiurnalExposure(nowMs, hourlyShare);
+  const dayMap = Object.create(null); // dayKey -> { officialPct, observed, isCapped }
   const ensureDay = (dk) => {
     if (!dayMap[dk]) {
       dayMap[dk] = { officialPct: 0, observed: false, isCapped: false };
@@ -919,6 +921,7 @@ export function computeWeeklyBurnForecast(
   };
 
   let hasPriorDayInCurrentCycle = false;
+  let hasUnloggedGapInCurrentCycle = false;
   const curCycleResetMs = Number(bucket.resetAtMs || 0);
 
   for (const cyc of cycles) {
@@ -991,17 +994,39 @@ export function computeWeeklyBurnForecast(
             const rec = ensureDay(gdk);
             rec.observed = true;
           }
-        } else if (dailyCost) {
+        } else {
           const spanKeys = [...gapDays, cur.dayKey];
-          const weights = spanKeys.map((dk) => Math.max(0, Number(dailyCost[dk] || 0)));
-          const totalW = weights.reduce((s, x) => s + x, 0);
-          if (totalW > 0) {
-            spanKeys.forEach((dk, idx) => {
-              const rec = ensureDay(dk);
-              rec.officialPct += delta * (weights[idx] / totalW);
-              rec.observed = true;
-            });
-            allocatedCurrent = true;
+          const allGapsHaveLocalCost = Boolean(
+            dailyCost && gapDays.every((dk) => Number(dailyCost[dk] || 0) > 0),
+          );
+          if (allGapsHaveLocalCost) {
+            const weights = spanKeys.map((dk) => Math.max(0, Number(dailyCost[dk] || 0)));
+            const totalW = weights.reduce((s, x) => s + x, 0);
+            if (totalW > 0) {
+              spanKeys.forEach((dk, idx) => {
+                const rec = ensureDay(dk);
+                rec.officialPct += delta * (weights[idx] / totalW);
+                rec.observed = true;
+              });
+              allocatedCurrent = true;
+            }
+          } else {
+            // Dual-device / offline-gap guard: this machine had no local logs on >=1 gap days while
+            // cloud quota rose (e.g. another machine worked). Spread delta across the gap by day
+            // exposure instead of dumping multi-day cloud usage onto the wake-up day!
+            if (isCurrentCycle) hasUnloggedGapInCurrentCycle = true;
+            const exposures = spanKeys.map((dk) =>
+              dk === todayKey ? Math.max(0.25, todayExposure) : 1.0,
+            );
+            const totalExp = exposures.reduce((s, x) => s + x, 0);
+            if (totalExp > 0) {
+              spanKeys.forEach((dk, idx) => {
+                const rec = ensureDay(dk);
+                rec.officialPct += delta * (exposures[idx] / totalExp);
+                rec.observed = true;
+              });
+              allocatedCurrent = true;
+            }
           }
         }
       }
@@ -1038,16 +1063,20 @@ export function computeWeeklyBurnForecast(
     }
   }
 
-  // 4. Self-calibrate pctPerUsd (official % per $1 of local weighted transcript cost) for cold-start backfill
+  // 4. Self-calibrate pctPerUsd (official % per $1 of local weighted transcript cost) for cold-start backfill.
+  // Dual-device guard: skip current-cycle calibration if this machine joined mid-cycle without prior-day
+  // observations (or had unlogged offline gaps), otherwise cloud usage from another machine would inflate pctPerUsd.
   let pctPerUsd = 0;
   let freshCalibration = null;
+  const curCycleStartMs = curCycleResetMs > 0 ? curCycleResetMs - windowMs : 0;
+  const curCycleStartDay = curCycleStartMs > 0 ? toLocalDayKey(curCycleStartMs) : '';
+  const joinedMidCycle = Boolean(curCycleStartDay && curCycleStartDay < todayKey && !hasPriorDayInCurrentCycle);
+
   if (familyActivity) {
     let calPctSum = 0;
     let calUsdSum = 0;
-    const curCycleStartMs = curCycleResetMs > 0 ? curCycleResetMs - windowMs : 0;
-    const curCycleStartDay = curCycleStartMs > 0 ? toLocalDayKey(curCycleStartMs) : '';
 
-    if (curCycleStartMs > 0 && bucket.usedPct >= 1.5) {
+    if (curCycleStartMs > 0 && bucket.usedPct >= 1.5 && !joinedMidCycle && !hasUnloggedGapInCurrentCycle) {
       const cycleUsd = sumHourlyCostInRange(familyActivity.hourlyBuckets, curCycleStartMs, nowMs);
       if (cycleUsd >= 0.5) {
         calPctSum += bucket.usedPct;
@@ -1085,10 +1114,16 @@ export function computeWeeklyBurnForecast(
     }
   }
 
-  // 5. Assemble past WEEKLY_LOOKBACK_DAYS completed days (yesterday .. 14 days ago)
+  // 5. Assemble past WEEKLY_LOOKBACK_DAYS completed days (yesterday .. 14 days ago).
+  // Once >=3 official cloud-ledger days exist, rely purely on cloud official deltas (accurate across multi-device)
+  // rather than backfilling older days from single-machine local transcript costs.
   const earliestObservedDay = Object.keys(dayMap)
     .filter((dk) => dayMap[dk].observed && dk < todayKey)
     .sort()[0] || '';
+  const observedOfficialPastDays = Object.keys(dayMap).filter(
+    (dk) => dk < todayKey && dayMap[dk].observed && !dayMap[dk].isCapped,
+  ).length;
+  const allowCalibratedBackfill = observedOfficialPastDays < 3 && pctPerUsd > 0 && Boolean(dailyCost);
 
   const rawCompleted = [];
   for (let age = WEEKLY_LOOKBACK_DAYS; age >= 1; age -= 1) {
@@ -1098,7 +1133,7 @@ export function computeWeeklyBurnForecast(
       rawCompleted.push({ dayKey: dk, age, pct: 0, capped: true, source: 'official' });
     } else if (rec?.observed) {
       rawCompleted.push({ dayKey: dk, age, pct: rec.officialPct, capped: false, source: 'official' });
-    } else if (pctPerUsd > 0 && dailyCost) {
+    } else if (allowCalibratedBackfill) {
       const usd = Number(dailyCost[dk] || 0);
       rawCompleted.push({ dayKey: dk, age, pct: usd * pctPerUsd, capped: false, source: 'calibrated' });
     } else if (earliestObservedDay && dk > earliestObservedDay) {
@@ -1118,7 +1153,8 @@ export function computeWeeklyBurnForecast(
   // 6. Determine today's usage & diurnal exposure fraction
   const todayRec = dayMap[todayKey];
   const todayOfficial = todayRec?.observed ? todayRec.officialPct : null;
-  const todayCalibrated = pctPerUsd > 0 && dailyCost ? Number(dailyCost[todayKey] || 0) * pctPerUsd : null;
+  const todayCalibrated =
+    !joinedMidCycle && pctPerUsd > 0 && dailyCost ? Number(dailyCost[todayKey] || 0) * pctPerUsd : null;
 
   let todayUsedPct = null;
   if (todayOfficial !== null && hasPriorDayInCurrentCycle) {
@@ -1132,8 +1168,6 @@ export function computeWeeklyBurnForecast(
     todayUsedPct = todayOfficial;
   }
 
-  const hourlyShare = familyActivity?.hourlyShare || fallbackHourlyShare;
-  const todayExposure = computeDiurnalExposure(nowMs, hourlyShare);
   const todayIsCapped = bucket.remainingPct <= 0.5 || Boolean(todayRec?.isCapped);
 
   // 7. Soft-Huber outlier damping (when >= 5 completed days) + Exposure-Weighted EWMA
@@ -1155,7 +1189,13 @@ export function computeWeeklyBurnForecast(
     vSum += w * damp(d.pct);
   }
 
-  const includeToday = todayUsedPct !== null && !todayIsCapped && (validDays.length > 0 || todayExposure >= 0.25);
+  // On a machine's very first partial day mid-cycle, todayOfficial misses earlier-today usage while
+  // bucket.usedPct already reflects cloud-wide usage -> let cycleDailyRaw lead until a full day completes.
+  const includeToday =
+    todayUsedPct !== null &&
+    !todayIsCapped &&
+    !joinedMidCycle &&
+    (validDays.length > 0 || todayExposure >= 0.25);
   const todayCap = Number.isFinite(spikeCap) ? Math.max(spikeCap * 1.2, 45) : Infinity;
   const effNum = vSum + (includeToday ? damp(todayUsedPct, todayCap) : 0);
   const effDen = wSum + (includeToday ? todayExposure : 0);
