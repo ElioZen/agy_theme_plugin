@@ -229,16 +229,57 @@ export class PrismStorage {
     this.onlineWallpapersDir = join(this.dataDir, 'online_wallpapers');
     this.settingsPath = join(this.dataDir, 'settings.json');
     this.companionConfigPath = join(this.dataDir, 'companion_config.json');
+    this.companionMetricsPath = join(this.dataDir, 'companion_metrics.json');
     this.binDir = join(this.dataDir, 'bin');
     this.rightPaneWidth = 0;
+    this.rightPaneHeight = 0;
+    this.#metricsCache = { key: '', data: null };
     this.#ensureDirs();
+    this.#hydratePaneMetricsFromDisk();
+  }
+
+  #metricsCache;
+
+  #hydratePaneMetricsFromDisk() {
+    try {
+      if (existsSync(this.companionConfigPath)) {
+        const raw = JSON.parse(readFileSync(this.companionConfigPath, 'utf-8'));
+        const w = Number(raw?.excludeRightWidth || 0);
+        const h = Number(raw?.excludeRightHeight || 0);
+        if (Number.isFinite(w) && w >= 120) this.rightPaneWidth = Math.round(w);
+        if (Number.isFinite(h) && h >= 120) this.rightPaneHeight = Math.round(h);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  loadCompanionMetrics() {
+    try {
+      if (!existsSync(this.companionMetricsPath)) return null;
+      const raw = readFileSync(this.companionMetricsPath, 'utf-8');
+      if (raw === this.#metricsCache.key) return this.#metricsCache.data;
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') return null;
+      this.#metricsCache = { key: raw, data: parsed };
+      return parsed;
+    } catch {
+      return this.#metricsCache.data;
+    }
   }
 
   setRightPaneWidth(width) {
-    const raw = Number(width);
-    const next = Number.isFinite(raw) && raw >= 120 ? Math.min(2400, Math.round(raw)) : 0;
-    if (next === this.rightPaneWidth) return false;
-    this.rightPaneWidth = next;
+    return this.setRightPaneMetrics(width, this.rightPaneHeight);
+  }
+
+  setRightPaneMetrics(width, height) {
+    const rawW = Number(width);
+    const nextW = Number.isFinite(rawW) && rawW >= 120 ? Math.min(2400, Math.round(rawW)) : 0;
+    const rawH = Number(height);
+    const nextH = Number.isFinite(rawH) && rawH >= 120 ? Math.min(2400, Math.round(rawH)) : 0;
+    if (nextW === this.rightPaneWidth && nextH === this.rightPaneHeight) return false;
+    this.rightPaneWidth = nextW;
+    this.rightPaneHeight = nextH;
     return true;
   }
 
@@ -439,7 +480,10 @@ export class PrismStorage {
       accentHex: settings.colors?.accent || '#6EA8FF',
       glassRim: settings.companion?.glassRim !== false,
       seamlessRightPane: seamless,
-      excludeRightWidth: seamless ? 0 : this.rightPaneWidth,
+      excludeRightWidth: this.rightPaneWidth,
+      excludeRightHeight: this.rightPaneHeight,
+      metricsPath: this.companionMetricsPath,
+      winMetricsPath: IS_WIN || IS_WSL ? toWindowsPath(this.companionMetricsPath) : '',
       updatedAt: Date.now(),
     };
     this.#writeAtomic(this.companionConfigPath, JSON.stringify(payload, null, 2));

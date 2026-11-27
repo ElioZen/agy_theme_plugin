@@ -29,6 +29,9 @@ namespace PrismBackdropWin
         public bool? glassRim { get; set; }
         public bool? seamlessRightPane { get; set; }
         public double? excludeRightWidth { get; set; }
+        public double? excludeRightHeight { get; set; }
+        public string metricsPath { get; set; }
+        public string winMetricsPath { get; set; }
         public double? updatedAt { get; set; }
 
         public CompanionConfig()
@@ -160,6 +163,9 @@ namespace PrismBackdropWin
         public static extern bool IsIconic(IntPtr hWnd);
 
         [DllImport("user32.dll")]
+        public static extern bool IsZoomed(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
         public static extern IntPtr GetForegroundWindow();
 
         [DllImport("user32.dll")]
@@ -276,6 +282,7 @@ namespace PrismBackdropWin
 
         private string _compositeKey = "";
         private Bitmap _compositeBitmap; // final premultiplied BGRA bitmap sized to target window
+        public Rectangle LastCutoutRect { get; private set; }
 
         private static Color ParseHexColor(string hex, Color fallback)
         {
@@ -478,7 +485,7 @@ namespace PrismBackdropWin
             return path;
         }
 
-        public Bitmap Render(CompanionConfig cfg, int width, int height, double dpiScale, out bool changed)
+        public Bitmap Render(CompanionConfig cfg, int width, int height, double dpiScale, bool isMaximized, out bool changed)
         {
             changed = false;
             if (width <= 0 || height <= 0) return null;
@@ -491,9 +498,34 @@ namespace PrismBackdropWin
             string fit = cfg.fit == "contain" ? "contain" : "cover";
             bool glassRim = cfg.glassRim ?? true;
             string accentHex = cfg.accentHex ?? "#6EA8FF";
-            bool seamless = cfg.seamlessRightPane ?? true;
-            int excludePx = seamless ? 0 : (int)Math.Round(Math.Max(0, cfg.excludeRightWidth ?? 0) * dpiScale);
-            int radiusPx = (int)Math.Round(Math.Max(0, Math.Min(28, cfg.cornerRadius)) * dpiScale);
+            // Always cut out the exact right sidecar iframe when open so both sides keep independent brightness & glass controls
+            int excludePx = (int)Math.Round(Math.Max(0, cfg.excludeRightWidth ?? 0) * dpiScale);
+            int excludeHeightPx = (int)Math.Round(Math.Max(0, cfg.excludeRightHeight ?? 0) * dpiScale);
+            int rightInsetPx = (int)Math.Round(8.0 * dpiScale);
+            int bottomInsetPx = (int)Math.Round(8.0 * dpiScale);
+            int defaultTopHeaderPx = (int)Math.Round(70.0 * dpiScale);
+            int radiusPx = isMaximized ? 0 : (int)Math.Round(Math.Max(0, Math.Min(28, cfg.cornerRadius)) * dpiScale);
+
+            int cutLeft = width;
+            int cutRight = width;
+            int cutTop = height;
+            int cutBottom = height;
+            if (excludePx > 1 && width > 240)
+            {
+                int clampedW = Math.Min(excludePx, (int)(width * 0.72f));
+                cutRight = Math.Max(80, width - rightInsetPx);
+                cutLeft = Math.Max(80, cutRight - clampedW);
+                cutBottom = Math.Max(100, height - bottomInsetPx);
+                if (excludeHeightPx > 120 && excludeHeightPx < height)
+                {
+                    cutTop = Math.Max(0, cutBottom - excludeHeightPx);
+                }
+                else
+                {
+                    cutTop = Math.Min(cutBottom, defaultTopHeaderPx);
+                }
+            }
+            LastCutoutRect = new Rectangle(cutLeft, cutTop, Math.Max(0, cutRight - cutLeft), Math.Max(0, cutBottom - cutTop));
 
             long mtime = 0;
             if (!string.IsNullOrEmpty(imgPath))
@@ -504,7 +536,7 @@ namespace PrismBackdropWin
             string key = string.Join("|", new string[] {
                 imgPath, mtime.ToString(), blurBucket.ToString(), opacityBucket.ToString(),
                 vigBucket.ToString(), style, fit, width.ToString(), height.ToString(),
-                glassRim ? "1" : "0", accentHex, excludePx.ToString(), radiusPx.ToString()
+                glassRim ? "1" : "0", accentHex, excludePx.ToString(), excludeHeightPx.ToString(), radiusPx.ToString()
             });
 
             if (key == _compositeKey && _compositeBitmap != null)
@@ -539,13 +571,14 @@ namespace PrismBackdropWin
                         g.DrawImage(src, dx, dy, dw, dh);
                     }
 
-                    // Pixel blend matching PrismBackdrop.swift (Luminance-Screen / Soft + Radial Vignette + Right-pane exclude + Corner mask)
+                    // Pixel blend matching PrismBackdrop.swift (Luminance-Screen / Soft + Radial Vignette + Exact Right-pane iframe cutout + Corner mask)
                     ApplyBlendAndMask(
                         fitted, result,
                         style == "soft",
                         (float)(opacityBucket / 100.0),
                         (float)(vigBucket / 100.0),
-                        excludePx,
+                        cutLeft, cutTop, cutRight, cutBottom,
+                        (int)Math.Round(8.0 * dpiScale),
                         radiusPx
                     );
                 }
@@ -580,16 +613,13 @@ namespace PrismBackdropWin
         private static unsafe void ApplyBlendAndMask(
             Bitmap srcBmp, Bitmap dstBmp,
             bool isSoft, float strength, float edgeFade,
-            int excludeRightPx, int radiusPx)
+            int cutLeft, int cutTop, int cutRight, int cutBottom,
+            int cutRadiusPx, int radiusPx)
         {
             int w = srcBmp.Width;
             int h = srcBmp.Height;
-            int visibleW = w;
-            if (excludeRightPx > 1 && w > 240)
-            {
-                int clamped = Math.Min(excludeRightPx, (int)(w * 0.72f));
-                visibleW = Math.Max(80, w - clamped);
-            }
+            bool hasCutout = cutLeft < cutRight && cutTop < cutBottom;
+            float cutRad = hasCutout ? Math.Max(0f, Math.Min(cutRadiusPx, Math.Min(cutRight - cutLeft, cutBottom - cutTop) * 0.5f)) : 0f;
 
             float baseK = Math.Max(0.08f, Math.Min(0.95f, strength));
             float softAlpha = Math.Max(0.05f, Math.Min(0.68f, strength * 0.68f));
@@ -614,11 +644,44 @@ namespace PrismBackdropWin
                     float ny2 = ny * ny;
                     byte* sRow = sBase + y * sStride;
                     byte* dRow = dBase + y * dStride;
+                    bool inCutY = hasCutout && y >= cutTop && y < cutBottom;
 
                     for (int x = 0; x < w; x++)
                     {
                         int idx = x * 4;
-                        if (x >= visibleW)
+                        float cutKeep = 1.0f;
+                        if (inCutY && x >= cutLeft && x < cutRight)
+                        {
+                            // Exclude only the exact right-pane iframe interior (with rounded corners matching Antigravity's card)
+                            if (cutRad > 0.5f)
+                            {
+                                float cx = -1f, cy = -1f;
+                                if (x < cutLeft + cutRad && y < cutTop + cutRad) { cx = cutLeft + cutRad; cy = cutTop + cutRad; }
+                                else if (x >= cutRight - cutRad && y < cutTop + cutRad) { cx = cutRight - cutRad; cy = cutTop + cutRad; }
+                                else if (x < cutLeft + cutRad && y >= cutBottom - cutRad) { cx = cutLeft + cutRad; cy = cutBottom - cutRad; }
+                                else if (x >= cutRight - cutRad && y >= cutBottom - cutRad) { cx = cutRight - cutRad; cy = cutBottom - cutRad; }
+
+                                if (cx >= 0f)
+                                {
+                                    float dx = (x + 0.5f) - cx;
+                                    float dy = (y + 0.5f) - cy;
+                                    float dist = (float)Math.Sqrt(dx * dx + dy * dy);
+                                    if (dist <= cutRad - 0.5f) cutKeep = 0f;
+                                    else if (dist < cutRad + 0.5f) cutKeep = dist - (cutRad - 0.5f);
+                                    else cutKeep = 1.0f;
+                                }
+                                else
+                                {
+                                    cutKeep = 0f;
+                                }
+                            }
+                            else
+                            {
+                                cutKeep = 0f;
+                            }
+                        }
+
+                        if (cutKeep <= 0.001f)
                         {
                             dRow[idx] = 0;
                             dRow[idx + 1] = 0;
@@ -637,8 +700,8 @@ namespace PrismBackdropWin
                             continue;
                         }
 
-                        // Anti-aliased rounded corner coverage
-                        float cornerCov = 1.0f;
+                        // Anti-aliased outer rounded corner coverage
+                        float cornerCov = cutKeep;
                         if (rad > 0.5f)
                         {
                             float cx = -1f, cy = -1f;
@@ -653,7 +716,7 @@ namespace PrismBackdropWin
                                 float dy = (y + 0.5f) - cy;
                                 float dist = (float)Math.Sqrt(dx * dx + dy * dy);
                                 if (dist >= rad + 0.5f) cornerCov = 0f;
-                                else if (dist > rad - 0.5f) cornerCov = rad + 0.5f - dist;
+                                else if (dist > rad - 0.5f) cornerCov *= (rad + 0.5f - dist);
                             }
                         }
 
@@ -816,6 +879,7 @@ namespace PrismBackdropWin
 
         private CompanionConfig _config;
         private string _lastConfigSig = "";
+        private string _lastMetricsSig = "";
         private Native.RECT _lastBounds;
         private byte _lastAlpha = 255;
         private bool _isVisible = false;
@@ -1049,6 +1113,35 @@ namespace PrismBackdropWin
             return best;
         }
 
+        private void PublishCompanionMetrics(int winW, int winH, Rectangle cutout, double dpiScale)
+        {
+            if (_config == null) return;
+            string outPath = !string.IsNullOrEmpty(_config.winMetricsPath) ? _config.winMetricsPath : (_config.metricsPath ?? "");
+            if (string.IsNullOrEmpty(outPath)) return;
+            double inv = dpiScale > 0.1 ? (1.0 / dpiScale) : 1.0;
+            double lw = Math.Round(winW * inv, 2);
+            double lh = Math.Round(winH * inv, 2);
+            double pl = Math.Round(cutout.Left * inv, 2);
+            double pt = Math.Round(cutout.Top * inv, 2);
+            double pw = Math.Round(cutout.Width * inv, 2);
+            double ph = Math.Round(cutout.Height * inv, 2);
+            string sig = string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                "{0}|{1}|{2}|{3}|{4}|{5}|{6:0.###}", lw, lh, pl, pt, pw, ph, dpiScale);
+            if (sig == _lastMetricsSig) return;
+            _lastMetricsSig = sig;
+            try
+            {
+                string json = string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                    "{{\"winWidth\":{0},\"winHeight\":{1},\"paneLeft\":{2},\"paneTop\":{3},\"paneWidth\":{4},\"paneHeight\":{5},\"dpiScale\":{6:0.###},\"updatedAt\":{7}}}",
+                    lw, lh, pl, pt, pw, ph, dpiScale, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+                string tmp = outPath + ".tmp." + Process.GetCurrentProcess().Id;
+                File.WriteAllText(tmp, json);
+                if (File.Exists(outPath)) File.Delete(outPath);
+                File.Move(tmp, outPath);
+            }
+            catch { }
+        }
+
         private void HideOverlay()
         {
             if (_isVisible)
@@ -1104,12 +1197,14 @@ namespace PrismBackdropWin
             }
 
             double dpiScale = Native.GetDpiScale(tracked.Hwnd);
+            bool isMaximized = Native.IsZoomed(tracked.Hwnd);
             bool bitmapChanged;
             Bitmap bmp = _renderer.Render(
                 _config,
                 tracked.Bounds.Width,
                 tracked.Bounds.Height,
                 dpiScale,
+                isMaximized,
                 out bitmapChanged);
 
             if (bmp == null)
@@ -1117,6 +1212,8 @@ namespace PrismBackdropWin
                 HideOverlay();
                 return;
             }
+
+            PublishCompanionMetrics(tracked.Bounds.Width, tracked.Bounds.Height, _renderer.LastCutoutRect, dpiScale);
 
             bool boundsChanged =
                 tracked.Bounds.Left != _lastBounds.Left ||

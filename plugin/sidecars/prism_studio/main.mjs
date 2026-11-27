@@ -53,6 +53,7 @@ function buildStatePayload(settings = storage.loadSettings()) {
     customWallpapers: storage.listCustomWallpapers(),
     onlineSources: ONLINE_SOURCES,
     companion: companion.getState(),
+    companionMetrics: storage.loadCompanionMetrics(),
   };
 }
 
@@ -113,14 +114,19 @@ app.api('/api/settings', async (data) => {
 });
 
 app.api('/api/pane-metrics', (data) => {
-  const changed = storage.setRightPaneWidth(data?.width);
+  const changed = storage.setRightPaneMetrics(data?.width, data?.height);
   if (changed) {
     const current = storage.loadSettings();
-    if (current.companion?.enabled && current.companion?.seamlessRightPane === false) {
+    if (current.companion?.enabled) {
       storage.syncCompanionConfig(current);
     }
   }
-  return { ok: true, rightPaneWidth: storage.rightPaneWidth };
+  return {
+    ok: true,
+    rightPaneWidth: storage.rightPaneWidth,
+    rightPaneHeight: storage.rightPaneHeight,
+    companionMetrics: storage.loadCompanionMetrics(),
+  };
 });
 
 app.api('/api/reset-colors', async () => {
@@ -293,6 +299,7 @@ app.api(
     return {
       ...clientSnap,
       officialQuota: quotaFetcher.getSnapshot(quotaActivity),
+      companionMetrics: storage.loadCompanionMetrics(),
     };
   },
   'GET',

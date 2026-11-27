@@ -19,18 +19,22 @@ struct CompanionConfig: Decodable {
     let glassRim: Bool?
     let seamlessRightPane: Bool?
     let excludeRightWidth: Double?
+    let excludeRightHeight: Double?
+    let metricsPath: String?
     let updatedAt: Double?
 }
 
 final class BackdropCanvasView: NSView {
     private let imageLayer = CALayer()
-    private let rightExcludeMaskLayer = CALayer()
+    private let rightExcludeMaskLayer = CAShapeLayer()
     private let rimLayer = CALayer()
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
     private var cachedImageKey: String = ""
     private var cachedCGImage: CGImage?
     private var currentExcludeRightWidth: CGFloat = 0
+    private var currentExcludeRightHeight: CGFloat = 0
+    private(set) var lastCutoutTopDown: CGRect = .zero
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -41,7 +45,8 @@ final class BackdropCanvasView: NSView {
         imageLayer.contentsGravity = .resizeAspectFill
         imageLayer.masksToBounds = true
 
-        rightExcludeMaskLayer.backgroundColor = NSColor.white.cgColor
+        rightExcludeMaskLayer.fillColor = NSColor.white.cgColor
+        rightExcludeMaskLayer.fillRule = .evenOdd
 
         rimLayer.backgroundColor = NSColor.clear.cgColor
         rimLayer.borderWidth = 1.5
@@ -56,13 +61,39 @@ final class BackdropCanvasView: NSView {
     }
 
     private func updateImageMask() {
-        let exclude = currentExcludeRightWidth
-        if exclude > 1.0 && bounds.width > 240.0 {
-            let clamped = min(exclude, bounds.width * 0.72)
-            let visibleW = max(80.0, bounds.width - clamped)
-            rightExcludeMaskLayer.frame = CGRect(x: 0, y: 0, width: visibleW, height: bounds.height)
+        let excludeW = currentExcludeRightWidth
+        let excludeH = currentExcludeRightHeight
+        let w = bounds.width
+        let h = bounds.height
+        if excludeW > 1.0 && w > 240.0 && h > 160.0 {
+            let rightInset: CGFloat = 8.0
+            let bottomInset: CGFloat = 8.0
+            let defaultTopHeader: CGFloat = 70.0
+            let clampedW = min(excludeW, w * 0.72)
+            let cutRight = max(80.0, w - rightInset)
+            let cutLeft = max(80.0, cutRight - clampedW)
+            let cutBottom = max(100.0, h - bottomInset)
+            let cutTop: CGFloat = (excludeH > 120.0 && excludeH < h)
+                ? max(0.0, cutBottom - excludeH)
+                : min(cutBottom, defaultTopHeader)
+            let cutW = max(0.0, cutRight - cutLeft)
+            let cutH = max(0.0, cutBottom - cutTop)
+            lastCutoutTopDown = CGRect(x: cutLeft, y: cutTop, width: cutW, height: cutH)
+
+            // Convert top-down cutout rect into AppKit bottom-up coordinates
+            let appKitY = h - cutBottom
+            let cutRect = CGRect(x: cutLeft, y: appKitY, width: cutW, height: cutH)
+            let path = CGMutablePath()
+            path.addRect(bounds)
+            if cutW > 2.0 && cutH > 2.0 {
+                let rad = min(8.0, min(cutW, cutH) * 0.5)
+                path.addRoundedRect(in: cutRect, cornerWidth: rad, cornerHeight: rad)
+            }
+            rightExcludeMaskLayer.frame = bounds
+            rightExcludeMaskLayer.path = path
             imageLayer.mask = rightExcludeMaskLayer
         } else {
+            lastCutoutTopDown = .zero
             imageLayer.mask = nil
         }
     }
@@ -254,8 +285,9 @@ final class BackdropCanvasView: NSView {
         layer?.cornerRadius = radius
         rimLayer.cornerRadius = max(0, radius - 0.75)
 
-        let seamless = config.seamlessRightPane ?? true
-        currentExcludeRightWidth = seamless ? 0 : CGFloat(max(0, config.excludeRightWidth ?? 0))
+        // Always cut out the exact right sidecar iframe when open so both sides keep independent brightness & glass controls
+        currentExcludeRightWidth = CGFloat(max(0, config.excludeRightWidth ?? 0))
+        currentExcludeRightHeight = CGFloat(max(0, config.excludeRightHeight ?? 0))
         updateImageMask()
 
         imageLayer.contentsGravity = (config.fit == "contain") ? .resizeAspect : .resizeAspectFill
@@ -295,6 +327,7 @@ final class BackdropController: NSObject {
 
     private var config: CompanionConfig?
     private var lastConfigSig: String = ""
+    private var lastMetricsSig: String = ""
     private var lastAppliedFrame: NSRect = .zero
     private var lastOrderedRelativeTo: Int = 0
     private var isOrderedIn = false
@@ -495,6 +528,32 @@ final class BackdropController: NSObject {
         )
     }
 
+    private func publishCompanionMetrics(frame: NSRect) {
+        guard let outPath = config?.metricsPath, !outPath.isEmpty else { return }
+        let cut = canvasView.lastCutoutTopDown
+        let winW = Double(frame.size.width)
+        let winH = Double(frame.size.height)
+        let pl = Double(cut.origin.x)
+        let pt = Double(cut.origin.y)
+        let pw = Double(cut.size.width)
+        let ph = Double(cut.size.height)
+        let sig = String(format: "%.2f|%.2f|%.2f|%.2f|%.2f|%.2f", winW, winH, pl, pt, pw, ph)
+        if sig == lastMetricsSig { return }
+        lastMetricsSig = sig
+        let ts = Int64(Date().timeIntervalSince1970 * 1000.0)
+        let json = String(
+            format: "{\"winWidth\":%.2f,\"winHeight\":%.2f,\"paneLeft\":%.2f,\"paneTop\":%.2f,\"paneWidth\":%.2f,\"paneHeight\":%.2f,\"dpiScale\":1,\"updatedAt\":%lld}",
+            winW, winH, pl, pt, pw, ph, ts
+        )
+        let tmp = "\(outPath).tmp.\(getpid())"
+        do {
+            try json.write(toFile: tmp, atomically: false, encoding: .utf8)
+            _ = rename(tmp, outPath)
+        } catch {
+            // ignore
+        }
+    }
+
     private func orderOutCompletely() {
         if isOrderedIn {
             window.orderOut(nil)
@@ -540,6 +599,7 @@ final class BackdropController: NSObject {
             window.setFrame(tracked.frame, display: true)
             lastAppliedFrame = tracked.frame
         }
+        publishCompanionMetrics(frame: tracked.frame)
 
         let agyIsTop = tracked.isTopmostRegular
         let isActive = isAntigravityFrontmost() || agyIsTop

@@ -59,7 +59,6 @@
   let saveSeq = 0;
   let lastReportedPaneWidth = -1;
   let paneResizeTimer = null;
-  let lastSeamlessWarnAt = 0;
 
   const $ = (sel) => document.querySelector(sel);
 
@@ -505,18 +504,83 @@
     const wpEl = $('#wallpaper-layer');
     if (wp.kind === 'none' || !wp.id) {
       wpEl.style.backgroundImage = 'none';
+      wpEl.style.backgroundSize = 'cover';
+      wpEl.style.backgroundPosition = 'center center';
     } else {
       const url = `/api/wallpaper?kind=${encodeURIComponent(wp.kind)}&id=${encodeURIComponent(wp.id)}`;
       wpEl.style.backgroundImage = `url("${url}")`;
-      wpEl.style.backgroundSize = wp.fit === 'contain' ? 'contain' : 'cover';
+      ensureWallpaperNaturalDims(url);
+      applySeamlessWallpaperGeometry(settings, url);
     }
 
     const comp = settings.companion || {};
     const isSeamless = Boolean(appState?.companion?.running && comp.enabled && comp.seamlessRightPane !== false);
     document.body.classList.toggle('companion-seamless', isSeamless);
     const noticeBar = $('#seamless-override-bar');
-    if (noticeBar) noticeBar.hidden = !isSeamless;
+    if (noticeBar) noticeBar.hidden = true;
     syncGlassPresetHighlight(settings);
+  }
+
+  const wallpaperNaturalDims = new Map();
+  const wallpaperDimsPending = new Set();
+
+  function ensureWallpaperNaturalDims(url) {
+    if (!url || wallpaperNaturalDims.has(url) || wallpaperDimsPending.has(url)) return;
+    wallpaperDimsPending.add(url);
+    const img = new Image();
+    img.onload = () => {
+      wallpaperDimsPending.delete(url);
+      if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+        wallpaperNaturalDims.set(url, { w: img.naturalWidth, h: img.naturalHeight });
+        if (appState?.settings) applySeamlessWallpaperGeometry(appState.settings, url);
+      }
+    };
+    img.onerror = () => {
+      wallpaperDimsPending.delete(url);
+    };
+    img.src = url;
+  }
+
+  function applySeamlessWallpaperGeometry(settings, urlOverride = '') {
+    const wpEl = $('#wallpaper-layer');
+    if (!wpEl) return;
+    const wp = settings?.wallpaper || {};
+    if (wp.kind === 'none' || !wp.id) return;
+    const fit = wp.fit === 'contain' ? 'contain' : 'cover';
+    const comp = settings?.companion || {};
+    const isSeamless = Boolean(appState?.companion?.running && comp.enabled && comp.seamlessRightPane !== false);
+    const metrics = appState?.companionMetrics || null;
+    const url = urlOverride || `/api/wallpaper?kind=${encodeURIComponent(wp.kind)}&id=${encodeURIComponent(wp.id)}`;
+    const dims = wallpaperNaturalDims.get(url);
+
+    if (
+      isSeamless &&
+      metrics &&
+      Number(metrics.winWidth) > 240 &&
+      Number(metrics.winHeight) > 160 &&
+      dims &&
+      dims.w > 0 &&
+      dims.h > 0
+    ) {
+      const winW = Number(metrics.winWidth);
+      const winH = Number(metrics.winHeight);
+      const paneLeft = Number(metrics.paneLeft || 0);
+      const paneTop = Number(metrics.paneTop || 0);
+      const scale =
+        fit === 'contain'
+          ? Math.min(winW / dims.w, winH / dims.h)
+          : Math.max(winW / dims.w, winH / dims.h);
+      const drawW = dims.w * scale;
+      const drawH = dims.h * scale;
+      const drawX = (winW - drawW) * 0.5;
+      const drawY = (winH - drawH) * 0.5;
+      wpEl.style.backgroundSize = `${drawW.toFixed(2)}px ${drawH.toFixed(2)}px`;
+      wpEl.style.backgroundPosition = `${(drawX - paneLeft).toFixed(2)}px ${(drawY - paneTop).toFixed(2)}px`;
+      return;
+    }
+
+    wpEl.style.backgroundSize = fit;
+    wpEl.style.backgroundPosition = 'center center';
   }
 
   function getGlassPresets() {
@@ -544,14 +608,27 @@
     });
   }
 
+  let lastReportedPaneKey = '';
+
   function reportPaneWidth(force = false) {
     const w = document.hidden ? 0 : Math.round(window.innerWidth || 0);
-    if (!force && w === lastReportedPaneWidth) return;
+    const h = document.hidden ? 0 : Math.round(window.innerHeight || 0);
+    const key = `${w}x${h}`;
+    if (!force && key === lastReportedPaneKey) return;
+    lastReportedPaneKey = key;
     lastReportedPaneWidth = w;
     apiFetch('/api/pane-metrics', {
       method: 'POST',
-      body: JSON.stringify({ width: w }),
-    }).catch(() => {});
+      body: JSON.stringify({ width: w, height: h }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((res) => {
+        if (res?.companionMetrics && appState) {
+          appState.companionMetrics = res.companionMetrics;
+          if (appState.settings) applySeamlessWallpaperGeometry(appState.settings);
+        }
+      })
+      .catch(() => {});
   }
 
   function syncCompanionControls(state) {
@@ -568,7 +645,8 @@
     const isSeamless = isCompanionActive && comp.seamlessRightPane !== false;
     document.body.classList.toggle('companion-seamless', isSeamless);
     const noticeBar = $('#seamless-override-bar');
-    if (noticeBar) noticeBar.hidden = !isSeamless;
+    if (noticeBar) noticeBar.hidden = true;
+    if (state.settings) applySeamlessWallpaperGeometry(state.settings);
 
     if (!companion?.supported) {
       badge.textContent = '仅支持 macOS / Windows';
@@ -579,7 +657,7 @@
       badge.classList.add('warn');
       toggleBtn.textContent = '正在准备...';
     } else if (isCompanionActive) {
-      badge.textContent = isSeamless ? '● 运行中 · 星光贯穿' : '● 运行中 · 左侧伴侣+右侧磨砂';
+      badge.textContent = isSeamless ? '● 运行中 · 无缝贯穿' : '● 运行中 · 独立铺图';
       badge.classList.add('running');
       toggleBtn.textContent = '关闭整窗氛围';
       toggleBtn.classList.add('is-active-danger');
@@ -1812,6 +1890,20 @@
     const res = await apiFetch(`/api/telemetry?${params.toString()}`, { method: 'GET' });
     if (!res.ok) return;
     telemetry = await res.json();
+    if (telemetry.companionMetrics && appState) {
+      const prev = appState.companionMetrics;
+      const next = telemetry.companionMetrics;
+      if (
+        !prev ||
+        prev.winWidth !== next.winWidth ||
+        prev.winHeight !== next.winHeight ||
+        prev.paneLeft !== next.paneLeft ||
+        prev.paneTop !== next.paneTop
+      ) {
+        appState.companionMetrics = next;
+        if (appState.settings) applySeamlessWallpaperGeometry(appState.settings);
+      }
+    }
     if (follow) selectedProjectId = telemetry.activeProjectId || '';
     renderCockpit();
   }
@@ -1828,6 +1920,9 @@
     if (res.ok) {
       appState = await res.json();
       renderStudio();
+      if (action === 'start') {
+        setTimeout(() => reportPaneWidth(true), 250);
+      }
       showToast(appState.companion?.running ? '整窗氛围伴侣已开启 ✨' : '整窗氛围伴侣已关闭');
     }
   }
@@ -2285,60 +2380,33 @@
       reader.readAsDataURL(file);
     });
 
-    const bindSlider = (id, readoutId, unit, pathBuilder, { rightPaneOnly = false } = {}) => {
+    const bindSlider = (id, readoutId, unit, pathBuilder) => {
       const input = $(id);
       if (!input) return;
       input.addEventListener('input', () => {
         const val = Number(input.value);
         $(readoutId).textContent = `${val}${unit}`;
         queueSaveSettings(pathBuilder(val), false, { skipRender: true });
-        if (rightPaneOnly && document.body.classList.contains('companion-seamless')) {
-          const now = Date.now();
-          if (now - lastSeamlessWarnAt > 3500) {
-            lastSeamlessWarnAt = now;
-            showToast('当前为「无缝贯穿」模式，点击上方「切为右侧真磨砂」即可立即生效');
-          }
-        }
       });
     };
 
-    bindSlider('#range-wp-opacity', '#val-wp-opacity', '%', (v) => ({ wallpaper: { opacity: v } }), { rightPaneOnly: true });
-    bindSlider('#range-wp-blur', '#val-wp-blur', 'px', (v) => ({ wallpaper: { blur: v } }), { rightPaneOnly: true });
+    bindSlider('#range-wp-opacity', '#val-wp-opacity', '%', (v) => ({ wallpaper: { opacity: v } }));
+    bindSlider('#range-wp-blur', '#val-wp-blur', 'px', (v) => ({ wallpaper: { blur: v } }));
     bindSlider('#range-wp-card-alpha', '#val-wp-card-alpha', '%', (v) => ({ wallpaper: { cardAlpha: v } }));
-    bindSlider('#range-wp-saturate', '#val-wp-saturate', '%', (v) => ({ wallpaper: { glassSaturate: v } }), { rightPaneOnly: true });
-    bindSlider('#range-wp-darkness', '#val-wp-darkness', '%', (v) => ({ wallpaper: { darkness: v } }), { rightPaneOnly: true });
+    bindSlider('#range-wp-saturate', '#val-wp-saturate', '%', (v) => ({ wallpaper: { glassSaturate: v } }));
+    bindSlider('#range-wp-darkness', '#val-wp-darkness', '%', (v) => ({ wallpaper: { darkness: v } }));
     bindSlider('#range-wp-radius', '#val-wp-radius', 'px', (v) => ({ wallpaper: { radius: v } }));
     bindSlider('#range-comp-opacity', '#val-comp-opacity', '%', (v) => ({ companion: { opacity: v } }));
     bindSlider('#range-comp-vignette', '#val-comp-vignette', '%', (v) => ({ companion: { vignette: v } }));
     bindSlider('#range-comp-blur', '#val-comp-blur', 'px', (v) => ({ companion: { blur: v } }));
-
-    $('#btn-enable-right-frost')?.addEventListener('click', async () => {
-      reportPaneWidth(true);
-      await queueSaveSettings({ companion: { seamlessRightPane: false } }, true);
-      showToast('已切为右侧独立真磨砂 ✨（左侧仍保留伴侣壁纸）');
-    });
 
     $('#glass-style-group')?.addEventListener('click', async (e) => {
       const btn = e.target.closest('[data-glass-preset]');
       if (!btn) return;
       const preset = getGlassPresets().find((p) => p.id === btn.dataset.glassPreset);
       if (!preset) return;
-      const wasSeamless = Boolean(
-        appState?.companion?.running &&
-          appState?.settings?.companion?.enabled &&
-          appState?.settings?.companion?.seamlessRightPane !== false,
-      );
-      const patch = { wallpaper: { ...preset.values } };
-      if (wasSeamless) {
-        patch.companion = { seamlessRightPane: false };
-        reportPaneWidth(true);
-      }
-      await queueSaveSettings(patch, true);
-      showToast(
-        wasSeamless
-          ? `已应用「${preset.name}」并开启右侧真磨砂 ✨`
-          : `已应用「${preset.name}」磨砂预设 ✨`,
-      );
+      await queueSaveSettings({ wallpaper: { ...preset.values } }, true);
+      showToast(`已应用「${preset.name}」磨砂预设 ✨`);
     });
 
     $('#wp-fit-group').addEventListener('click', (e) => {
@@ -2348,7 +2416,7 @@
     });
 
     $('#chk-comp-seamless').addEventListener('change', (e) => {
-      if (!e.target.checked) reportPaneWidth(true);
+      reportPaneWidth(true);
       queueSaveSettings({ companion: { seamlessRightPane: e.target.checked } }, true);
     });
     $('#chk-comp-rim').addEventListener('change', (e) => {
@@ -2370,7 +2438,8 @@
     document.addEventListener('visibilitychange', () => reportPaneWidth(true));
     window.addEventListener('pagehide', () => {
       lastReportedPaneWidth = 0;
-      apiFetch('/api/pane-metrics', { method: 'POST', body: JSON.stringify({ width: 0 }) }).catch(() => {});
+      lastReportedPaneKey = '';
+      apiFetch('/api/pane-metrics', { method: 'POST', body: JSON.stringify({ width: 0, height: 0 }) }).catch(() => {});
     });
   }
 
