@@ -1,5 +1,5 @@
 (() => {
-  const FRONTEND_VERSION = '3.9.4';
+  const FRONTEND_VERSION = '3.9.5';
   const FALLBACK_GLASS_PRESETS = [
     {
       id: 'frosted-dark',
@@ -954,7 +954,7 @@
   function renderSparkline(points) {
     const svg = $('#speed-sparkline');
     if (!points || points.length < 2) {
-      setHtmlIfChanged(svg, `<text x="60" y="18" text-anchor="middle" fill="var(--prism-muted)" font-size="9">待采样</text>`);
+      setHtmlIfChanged(svg, `<text x="60" y="19" text-anchor="middle" fill="var(--prism-muted)" font-size="11" font-family="var(--prism-font-sans)">待采样</text>`);
       return;
     }
     const vals = points.map((p) => p.rate);
@@ -1363,7 +1363,7 @@
               <div class="proj-mini-chip ${isSelected ? 'active' : ''}" data-pick-project-id="${escapeHtml(p.id)}">
                 <div class="proj-mini-name">
                   <span>${escapeHtml(p.name)}</span>
-                  ${isSelected ? `<span class="badge-pill running" style="padding:1px 5px;font-size:9.5px">当前</span>` : ''}
+                  ${isSelected ? `<span class="badge-pill running" style="padding:1px 6px;font-size:11px">当前</span>` : ''}
                 </div>
                 <div class="proj-mini-val tabular">${formatCompact(p.totalTokens)} · 缓存 ${p.cacheHitRate.toFixed(0)}%</div>
               </div>
